@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tactical Advisor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff41; }
+        .header { background: #111; padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 18px; letter-spacing: 2px; }
+        .status-bar { display: flex; gap: 16px; font-size: 12px; color: #888; flex-wrap: wrap; }
+        .status-bar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+        .dot.active { background: #00ff41; }
+        .dot.inactive { background: #ff4444; }
+        .dot.loading { background: #ff8800; }
+
+        .container { padding: 20px; max-width: 900px; margin: 0 auto; }
+
+        .stats { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+        .stat { background: #111; border: 1px solid #333; padding: 8px 14px; border-radius: 4px; }
+        .stat .num { font-size: 20px; color: #fff; }
+        .stat .label { font-size: 10px; color: #888; text-transform: uppercase; }
+
+        .section-title { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 8px; }
+
+        .quick-buttons { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+        .quick-btn { background: #1a1a1a; border: 1px solid #333; color: #00ff41; padding: 8px 14px; font-family: inherit; font-size: 12px; cursor: pointer; border-radius: 4px; }
+        .quick-btn:hover { background: #222; border-color: #00ff41; }
+
+        .query-box { display: flex; gap: 8px; margin-bottom: 20px; }
+        .query-box input { flex: 1; background: #111; border: 1px solid #333; color: #00ff41; padding: 10px 14px; font-family: inherit; font-size: 14px; border-radius: 4px; }
+        .query-box input:focus { outline: none; border-color: #00ff41; }
+        .query-box button { background: #00ff41; color: #0a0a0a; border: none; padding: 10px 20px; font-family: inherit; font-size: 14px; font-weight: bold; cursor: pointer; border-radius: 4px; }
+        .query-box button:hover { background: #00cc33; }
+        .query-box button:disabled { background: #333; color: #666; cursor: not-allowed; }
+
+        .response-area { background: #111; border: 1px solid #333; border-radius: 4px; padding: 16px; min-height: 200px; white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: #ccc; }
+        .response-area.loading { color: #ff8800; }
+        .response-area .placeholder { color: #555; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>TACTICAL ADVISOR</h1>
+        <div class="status-bar">
+            <span><span class="dot loading" id="model-dot"></span><span id="model-status">Loading...</span></span>
+            <span><span class="dot inactive" id="fts-dot"></span><span id="fts-status">FTS Disconnected</span></span>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="stats">
+            <div class="stat"><div class="num" id="stat-units">0</div><div class="label">Units</div></div>
+            <div class="stat"><div class="num" id="stat-messages">0</div><div class="label">Messages</div></div>
+            <div class="stat"><div class="num" id="stat-alerts" style="color:#ff8800">0</div><div class="label">Alerts</div></div>
+            <div class="stat"><div class="num" id="stat-drones" style="color:#ff4444">0</div><div class="label">Drones</div></div>
+        </div>
+
+        <div class="section-title">Quick queries</div>
+        <div class="quick-buttons">
+            <button class="quick-btn" onclick="sendQuery('Give me a SITREP summary of the current operational picture')">SITREP Summary</button>
+            <button class="quick-btn" onclick="sendQuery('Assess current threats and recommend force protection measures')">Threat Assessment</button>
+            <button class="quick-btn" onclick="sendQuery('Assess unit dispersion and recommend adjustments')">Unit Dispersion</button>
+            <button class="quick-btn" onclick="sendQuery('Summarise drone threat activity and recommend countermeasures')">Drone Threat</button>
+        </div>
+
+        <div class="section-title">Query</div>
+        <div class="query-box">
+            <input type="text" id="query-input" placeholder="Ask the tactical advisor..." onkeydown="if(event.key==='Enter')submitQuery()">
+            <button id="send-btn" onclick="submitQuery()">SEND</button>
+        </div>
+
+        <div class="section-title">Response</div>
+        <div class="response-area" id="response">
+            <span class="placeholder">Response will appear here...</span>
+        </div>
+    </div>
+
+    <script>
+        const responseEl = document.getElementById('response');
+        const inputEl = document.getElementById('query-input');
+        const sendBtn = document.getElementById('send-btn');
+
+        function sendQuery(text) {
+            inputEl.value = text;
+            submitQuery();
+        }
+
+        async function submitQuery() {
+            const query = inputEl.value.trim();
+            if (!query) return;
+
+            sendBtn.disabled = true;
+            responseEl.className = 'response-area loading';
+            responseEl.textContent = 'Thinking...';
+
+            try {
+                const res = await fetch('/api/query', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({query}),
+                });
+                const data = await res.json();
+                responseEl.className = 'response-area';
+                responseEl.textContent = data.response;
+            } catch (e) {
+                responseEl.className = 'response-area';
+                responseEl.textContent = 'Error: ' + e.message;
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        async function pollStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const s = await res.json();
+
+                document.getElementById('stat-units').textContent = s.positions;
+                document.getElementById('stat-messages').textContent = s.messages;
+                document.getElementById('stat-alerts').textContent = s.alerts;
+                document.getElementById('stat-drones').textContent = s.drones;
+
+                const modelDot = document.getElementById('model-dot');
+                const modelStatus = document.getElementById('model-status');
+                if (s.model_loaded) {
+                    modelDot.className = 'dot active';
+                    modelStatus.textContent = s.model_name || 'Model loaded';
+                } else {
+                    modelDot.className = 'dot loading';
+                    modelStatus.textContent = 'No model';
+                }
+
+                const ftsDot = document.getElementById('fts-dot');
+                const ftsStatus = document.getElementById('fts-status');
+                if (s.fts_connected) {
+                    ftsDot.className = 'dot active';
+                    ftsStatus.textContent = 'FTS Connected';
+                } else {
+                    ftsDot.className = 'dot inactive';
+                    ftsStatus.textContent = 'FTS Disconnected';
+                }
+            } catch (e) {}
+        }
+
+        setInterval(pollStatus, 3000);
+        pollStatus();
+    </script>
+</body>
+</html>

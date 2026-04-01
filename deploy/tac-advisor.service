@@ -1,0 +1,14 @@
+[Unit]
+Description=Tactical LLM Advisor
+After=network.target fts.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tac-advisor
+ExecStart=/opt/tac-advisor/deploy/start.sh
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
