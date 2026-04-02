@@ -86,7 +86,7 @@ class CotListener:
         self._positions: dict[str, PositionInfo] = {}
         self._messages: list[MessageInfo] = []
         self._alerts: list[AlertInfo] = []
-        self._drones: list[DroneInfo] = {}
+        self._drones: dict[str, DroneInfo] = {}
         self._connected = False
         self._running = False
 
@@ -108,7 +108,7 @@ class CotListener:
                 "positions": dict(self._positions),
                 "messages": list(self._messages),
                 "alerts": list(self._alerts),
-                "drones": list(self._drones.values()) if isinstance(self._drones, dict) else list(self._drones),
+                "drones": list(self._drones.values()),
             }
 
     def _reader_loop(self):
@@ -116,6 +116,7 @@ class CotListener:
         parser = CotStreamParser()
 
         while self._running:
+            sock = None
             try:
                 sock = socket.create_connection((self._host, self._port), timeout=10)
                 self._connected = True
@@ -133,10 +134,11 @@ class CotListener:
                 logger.warning("FTS connection error: %s (retry in %ds)", e, backoff)
             finally:
                 self._connected = False
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+                if sock:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
 
             if self._running:
                 time.sleep(backoff)
@@ -218,8 +220,6 @@ class CotListener:
 
             # Hostile UAV (drone detector)
             elif cot_type.startswith("a-h-A-"):
-                if isinstance(self._drones, list):
-                    self._drones = {}
                 self._drones[uid] = DroneInfo(
                     uid=uid, lat=lat, lon=lon, alt=alt, callsign=callsign,
                 )
@@ -241,13 +241,12 @@ class CotListener:
                     if now - a.timestamp <= self.ALERT_STALE_S
                 ]
 
-                if isinstance(self._drones, dict):
-                    stale_drones = [
-                        k for k, v in self._drones.items()
-                        if now - v.timestamp > self.ALERT_STALE_S
-                    ]
-                    for k in stale_drones:
-                        del self._drones[k]
+                stale_drones = [
+                    k for k, v in self._drones.items()
+                    if now - v.timestamp > self.ALERT_STALE_S
+                ]
+                for k in stale_drones:
+                    del self._drones[k]
 
 
 class SimulatedCotListener(CotListener):
@@ -327,8 +326,6 @@ class SimulatedCotListener(CotListener):
             # Rare drone sighting
             if random.random() < 0.03:
                 with self._lock:
-                    if isinstance(self._drones, list):
-                        self._drones = {}
                     self._drones["DRONE-sim-1"] = DroneInfo(
                         uid="DRONE-sim-1",
                         lat=51.151 + random.uniform(-0.002, 0.002),

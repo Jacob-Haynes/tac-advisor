@@ -49,14 +49,15 @@ def create_app():
 
     @app.get("/api/status")
     async def status():
+        state = listener.get_state() if listener else {}
         return {
             "model_loaded": engine.is_loaded if engine else False,
             "model_name": engine.model_name if engine else None,
             "fts_connected": listener.connected if listener else False,
-            "positions": len(listener.get_state()["positions"]) if listener else 0,
-            "messages": len(listener.get_state()["messages"]) if listener else 0,
-            "alerts": len(listener.get_state()["alerts"]) if listener else 0,
-            "drones": len(listener.get_state()["drones"]) if listener else 0,
+            "positions": len(state.get("positions", {})),
+            "messages": len(state.get("messages", [])),
+            "alerts": len(state.get("alerts", [])),
+            "drones": len(state.get("drones", [])),
         }
 
     return app
