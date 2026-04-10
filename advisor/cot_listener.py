@@ -1,4 +1,4 @@
-"""Connect to FreeTAKServer TCP, parse CoT stream, maintain tactical state."""
+"""Connect to TAK server TCP, parse CoT stream, maintain tactical state."""
 
 import logging
 import random
@@ -71,7 +71,7 @@ class DroneInfo:
 
 
 class CotListener:
-    """Connects to FTS TCP and maintains tactical state from CoT events."""
+    """Connects to TAK server TCP and maintains tactical state from CoT events."""
 
     POSITION_STALE_S = 60
     ALERT_STALE_S = 300
@@ -121,7 +121,7 @@ class CotListener:
                 sock = socket.create_connection((self._host, self._port), timeout=10)
                 self._connected = True
                 backoff = self.RECONNECT_MIN
-                logger.info("Connected to FTS at %s:%d", self._host, self._port)
+                logger.info("Connected to TAK at %s:%d", self._host, self._port)
 
                 while self._running:
                     data = sock.recv(4096)
@@ -131,7 +131,7 @@ class CotListener:
                         self._process_event(event_xml)
 
             except (OSError, ConnectionError) as e:
-                logger.warning("FTS connection error: %s (retry in %ds)", e, backoff)
+                logger.warning("TAK connection error: %s (retry in %ds)", e, backoff)
             finally:
                 self._connected = False
                 if sock:
@@ -250,7 +250,7 @@ class CotListener:
 
 
 class SimulatedCotListener(CotListener):
-    """Generates fake tactical data for testing without FTS."""
+    """Generates fake tactical data for testing without a TAK server."""
 
     UNITS = [
         ("Alpha-1", 51.15, -1.75),

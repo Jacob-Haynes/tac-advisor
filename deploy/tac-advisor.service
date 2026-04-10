@@ -1,6 +1,6 @@
 [Unit]
 Description=Tactical LLM Advisor
-After=network.target fts.service
+After=network.target opentakserver.service
 
 [Service]
 Type=simple

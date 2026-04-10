@@ -45,7 +45,7 @@
         <h1>TACTICAL ADVISOR</h1>
         <div class="status-bar">
             <span><span class="dot loading" id="model-dot"></span><span id="model-status">Loading...</span></span>
-            <span><span class="dot inactive" id="fts-dot"></span><span id="fts-status">FTS Disconnected</span></span>
+            <span><span class="dot inactive" id="tak-dot"></span><span id="tak-status">TAK Disconnected</span></span>
         </div>
     </div>
 
@@ -132,14 +132,14 @@
                     modelStatus.textContent = 'No model';
                 }
 
-                const ftsDot = document.getElementById('fts-dot');
-                const ftsStatus = document.getElementById('fts-status');
-                if (s.fts_connected) {
-                    ftsDot.className = 'dot active';
-                    ftsStatus.textContent = 'FTS Connected';
+                const takDot = document.getElementById('tak-dot');
+                const takStatus = document.getElementById('tak-status');
+                if (s.tak_connected) {
+                    takDot.className = 'dot active';
+                    takStatus.textContent = 'TAK Connected';
                 } else {
-                    ftsDot.className = 'dot inactive';
-                    ftsStatus.textContent = 'FTS Disconnected';
+                    takDot.className = 'dot inactive';
+                    takStatus.textContent = 'TAK Disconnected';
                 }
             } catch (e) {}
         }

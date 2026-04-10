@@ -53,7 +53,7 @@ def create_app():
         return {
             "model_loaded": engine.is_loaded if engine else False,
             "model_name": engine.model_name if engine else None,
-            "fts_connected": listener.connected if listener else False,
+            "tak_connected": listener.connected if listener else False,
             "positions": len(state.get("positions", {})),
             "messages": len(state.get("messages", [])),
             "alerts": len(state.get("alerts", [])),

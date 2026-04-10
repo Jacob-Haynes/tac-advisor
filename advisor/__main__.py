@@ -8,8 +8,8 @@ import uvicorn
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Tactical LLM Advisor")
-    parser.add_argument("--fts-host", default="127.0.0.1", help="FreeTAKServer host")
-    parser.add_argument("--fts-port", type=int, default=8087, help="FreeTAKServer port")
+    parser.add_argument("--tak-host", "--fts-host", default="127.0.0.1", help="TAK server host")
+    parser.add_argument("--tak-port", "--fts-port", type=int, default=8087, help="TAK server CoT TCP port")
     parser.add_argument("--web-port", type=int, default=8090, help="Web UI port")
     parser.add_argument("--mesh-port", default="/dev/ttyUSB0", help="Meshtastic serial port")
     parser.add_argument("--no-mesh", action="store_true", help="Disable Meshtastic query interface")
@@ -39,10 +39,10 @@ def main():
     # CoT listener
     if args.simulate:
         from advisor.cot_listener import SimulatedCotListener
-        listener = SimulatedCotListener(host=args.fts_host, port=args.fts_port)
+        listener = SimulatedCotListener(host=args.tak_host, port=args.tak_port)
     else:
         from advisor.cot_listener import CotListener
-        listener = CotListener(host=args.fts_host, port=args.fts_port)
+        listener = CotListener(host=args.tak_host, port=args.tak_port)
     listener.start()
 
     # Meshtastic query handler
