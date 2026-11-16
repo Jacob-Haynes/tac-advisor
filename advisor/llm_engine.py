@@ -197,7 +197,33 @@ class OpenAICompatBackend:
             logger.warning("Unknown LLM_API=%r, using auto", self.api)
             self.api = "auto"
         self.api_key = api_key if api_key is not None else os.environ.get("LLM_API_KEY", "")
+        self.max_tokens_cap = int(os.environ.get("LLM_MAX_TOKENS", "512"))
         self._send_think = True
+        self._send_effort = True
+        self._is_ollama: bool | None = None  # from GET /api/version, probed once
+        self.last_api: str | None = None
+
+    @property
+    def label(self) -> str:
+        """What actually answered, e.g. "ollama:qwen3.5:27b" or "openai:local-model"."""
+        api = self.last_api or ("ollama" if self.api == "ollama" else "openai" if self.api == "openai" else "llm")
+        return f"{api}:{self.model_name}"
+
+    def is_ollama(self) -> bool:
+        """True if the server is Ollama: the URL says so, or GET /api/version answers like Ollama."""
+        if _looks_like_ollama(self.base_url):
+            return True
+        if self._is_ollama is None:
+            try:
+                req = urllib.request.Request(self.base_url + "/api/version")
+                with urllib.request.urlopen(req, timeout=min(3.0, self.timeout_s)) as resp:
+                    data = json.loads(resp.read() or b"{}")
+                self._is_ollama = isinstance(data, dict) and "version" in data
+            except urllib.error.HTTPError:
+                self._is_ollama = False  # it answered, but not as Ollama
+            except (OSError, ValueError):
+                return False  # unreachable: decide next time
+        return bool(self._is_ollama)
 
     def _post(self, path: str, body: dict) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -211,7 +237,7 @@ class OpenAICompatBackend:
         body = {"model": self.model_name, "messages": messages, "stream": False,
                 # keep the model in memory between queries (default Ollama unload is 5 min)
                 "keep_alive": os.environ.get("LLM_KEEP_ALIVE", "30m"),
-                "options": {"temperature": 0.3, "num_predict": max_tokens}}
+                "options": {"temperature": 0.3, "num_predict": min(max_tokens, self.max_tokens_cap)}}
         if self._send_think:
             body["think"] = False  # thinking models (qwen3.5) answer far faster without it
         try:
@@ -226,9 +252,19 @@ class OpenAICompatBackend:
         return data["message"].get("content") or ""
 
     def _openai(self, messages: list, max_tokens: int) -> str:
-        data = self._post("/v1/chat/completions", {"model": self.model_name, "messages": messages,
-                                                   "max_tokens": max_tokens, "temperature": 0.3,
-                                                   "stream": False})
+        body = {"model": self.model_name, "messages": messages, "temperature": 0.3, "stream": False,
+                "max_tokens": min(max_tokens, self.max_tokens_cap)}
+        if self._send_effort and self.is_ollama():
+            # Ollama ignores "think": false on /v1/chat/completions; reasoning_effort "none" turns
+            # thinking off there (qwen3.5 otherwise thinks for over a minute before answering)
+            body["reasoning_effort"] = "none"
+        try:
+            data = self._post("/v1/chat/completions", body)
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and "reasoning_effort" in body:  # a version that rejects it
+                self._send_effort = False
+                return self._openai(messages, max_tokens)
+            raise
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices or not isinstance(choices[0], dict):
             raise ShapeMismatch("response is not OpenAI chat.completions shape")
@@ -241,7 +277,8 @@ class OpenAICompatBackend:
     def _order(self) -> list[str]:
         if self.api in ("openai", "ollama"):
             return [self.api]
-        first = "ollama" if _looks_like_ollama(self.base_url) else "openai"
+        # auto: Ollama's native /api/chat (thinking reliably off) whenever the server is Ollama
+        first = "ollama" if self.is_ollama() else "openai"
         return [first, "openai" if first == "ollama" else "ollama"]
 
     def generate(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
@@ -260,6 +297,7 @@ class OpenAICompatBackend:
                 raise
             if self.api == "auto" and i > 0:
                 self.api = api  # remember what worked
+            self.last_api = api
             break
         text = _THINK_TAG_RE.sub("", text).strip()
         if not text:
@@ -276,6 +314,9 @@ class LLMEngine:
         from advisor.template_sitrep import TemplateBackend
 
         self.mode = (backend or os.environ.get("LLM_BACKEND", "auto")).strip().lower()
+        force_api = None
+        if self.mode in ("ollama", "openai"):  # the LLM_URL server, with that request shape
+            force_api, self.mode = self.mode, "openai_compat"
         if self.mode not in ("auto", "openai_compat", "gemini", "local", "template"):
             logger.warning("Unknown LLM_BACKEND=%r, using auto", self.mode)
             self.mode = "auto"
@@ -290,7 +331,7 @@ class LLMEngine:
         if self._remote is None and self.mode in ("auto", "openai_compat"):
             url = os.environ.get("LLM_URL", "").strip()
             if url:
-                self._remote = OpenAICompatBackend(url)
+                self._remote = OpenAICompatBackend(url, api=force_api)
                 logger.info("LLM server backend: %s model %s", self._remote.base_url, self._remote.model_name)
             elif self.mode == "openai_compat":
                 logger.warning("LLM_BACKEND=openai_compat but LLM_URL is not set — using local model")
@@ -332,7 +373,7 @@ class LLMEngine:
                 continue
             try:
                 text = backend.generate(system_prompt, user_prompt, max_tokens)
-                self.last_backend = f"{backend.name}:{backend.model_name}"
+                self.last_backend = getattr(backend, "label", None) or f"{backend.name}:{backend.model_name}"
                 return text
             except Exception as e:
                 self._down_until[backend.name] = time.monotonic() + RETRY_AFTER_S

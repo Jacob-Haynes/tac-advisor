@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument("--mesh-port", default=None, help=argparse.SUPPRESS)  # old name for --serial
     parser.add_argument("--model", default=env("ADVISOR_MODEL") or None,
                         help="GGUF model filename (auto-detect by default)")
-    parser.add_argument("--backend", choices=["auto", "openai_compat", "gemini", "local", "template"], default=None,
+    parser.add_argument("--backend", choices=["auto", "openai_compat", "ollama", "openai", "gemini", "local", "template"], default=None,
                         help="LLM backend (env LLM_BACKEND, default auto)")
     parser.add_argument("--simulate", action="store_true", help="Use simulated tactical data (no TAK server)")
     args = parser.parse_args()

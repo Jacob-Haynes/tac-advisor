@@ -13,7 +13,7 @@ import threading
 
 from advisor.context_builder import SYSTEM_PROMPT, build_context
 from advisor.mesh_link import InboundText
-from advisor.template_sitrep import build_sitrep
+from advisor.template_sitrep import build_sitrep, ensure_categories
 
 logger = logging.getLogger(__name__)
 
@@ -88,15 +88,17 @@ class MeshQueryHandler:
         try:
             context = build_context(state)
             prompt = f"{context}\n\nQuery from {msg.display}: {query}{MESH_STYLE}"
-            text = shorten(self._engine.generate(SYSTEM_PROMPT, prompt, max_tokens=160))
+            text = shorten(self._engine.generate(SYSTEM_PROMPT, prompt, max_tokens=160), 10_000)
         except Exception:
             logger.exception("Advisor failed to answer %r", query)
             text = ""
         if not text or looks_like_error(text):
             if text:
                 logger.warning("Not sending setup/error text over the mesh: %s", text)
-            text = shorten(build_sitrep(state, compact=True))
-        return text
+            return shorten(build_sitrep(state, compact=True))
+        if not str(getattr(self._engine, "last_backend", "") or "").startswith("template"):
+            text = ensure_categories(text, state, limit=MAX_RESPONSE_LEN)  # counts can't be dropped
+        return shorten(text)
 
     def _reply(self, msg: InboundText, text: str):
         if self._link is None:

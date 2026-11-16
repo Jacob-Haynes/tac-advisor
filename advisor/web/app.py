@@ -48,6 +48,10 @@ def create_app():
 
         # LLM calls block for seconds; keep them off the event loop
         response = await run_in_threadpool(engine.generate, SYSTEM_PROMPT, full_prompt)
+        if not str(engine.last_backend or "").startswith("template"):
+            from advisor.template_sitrep import ensure_categories
+
+            response = ensure_categories(response, state)  # every nonzero category stays in
         return {"response": response, "backend": engine.last_backend}
 
     @app.get("/api/context")

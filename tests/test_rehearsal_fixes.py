@@ -78,7 +78,8 @@ def test_context_tags_labels_for_the_llm():
     assert "SIM-1581F5 [drone-detector] [SIMULATED]" in ctx
     assert "SPOT 161502 [RECORDED]" in ctx
     assert "Bravo-2 [SIMULATED]" in ctx and "Alpha-1:" in ctx
-    assert ctx.startswith("DATA LABELS:") and "2 simulated drone detections" in ctx
+    assert ctx.startswith("PICTURE COUNTS") and "\n\nDATA LABELS:" in ctx
+    assert "2 simulated drone detections" in ctx
 
 
 def test_simulated_listener_labels_everything():
@@ -148,3 +149,66 @@ def test_mesh_error_text_from_a_backend_is_replaced(caplog):
     for eng in (ErrEngine(), Boom()):
         reply = MeshQueryHandler(eng, li, FakeLink()).answer(InboundText(from_id="!a", text="ADVISOR: sitrep"))
         assert reply.startswith("SITREP") and "simulated" in reply and len(reply) <= 200
+
+
+
+# ── rehearsal 3: an LLM must not drop a category ─────────────────
+
+def busy_picture():
+    li = picture()
+    for i in range(3):
+        li._process_event(cot(f"DRONE-SIM-X{i}", "a-h-A-M-F-Q", f"SIM-UAV {i}", "SIMULATED: drone-detector"))
+    li._process_event(cot("RFSPEC-433", "a-u-G", "RF 433.920", "SIMULATED: RF: new emitter"))
+    li._process_event(cot("ACOUSTIC-OP1-UAV", "a-u-A-M-F-Q", "UAV? (acoustic OP1)", "acoustic-detector"))
+    li._process_event(cot("change-detect-a1", "a-u-G", "CHANGE a1 (2)", "change-detect: new tracks"))
+    return li
+
+
+def test_category_counts_cover_every_nonzero_category():
+    from advisor.template_sitrep import category_counts
+
+    rows = {k: phrase for k, _, phrase in category_counts(busy_picture().get_state())}
+    assert rows["drones"] == "6 drone detections (5 simulated)"
+    assert set(rows) == {"drones", "people", "rf", "acoustic", "change", "positions"}
+    assert rows["people"] == "2 people/vehicle detections (1 recorded)"
+
+
+class DropsDrones:
+    """A model that answers fluently but leaves out the drones (as qwen3.5:27b did)."""
+    last_backend = "ollama:qwen3.5:27b"
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.prompts = []
+
+    def generate(self, system, user, max_tokens=512):
+        self.prompts.append((system, user))
+        return self.reply
+
+
+def test_every_nonzero_category_appears_in_mesh_and_web_answers():
+    from advisor.template_sitrep import category_counts, ensure_categories, missing_categories
+
+    li = busy_picture()
+    st = li.get_state()
+    eng = DropsDrones("SITREP: 2 units in position, OP1 reports 2 people. All quiet otherwise.")
+    reply = MeshQueryHandler(eng, li, FakeLink()).answer(InboundText(from_id="!a", text="ADVISOR: sitrep"))
+    assert len(reply) <= 200
+    for _, _, phrase in category_counts(st):
+        assert phrase in reply or not missing_categories(reply, st), phrase
+    assert "6 drone detections (5 simulated)" in reply
+    # the prompt carried the counts and the instruction
+    system, user = eng.prompts[0]
+    assert "PICTURE COUNTS" in user and "6 drone detections (5 simulated)" in user
+    assert "never leave a category out" in system
+    full = ensure_categories(eng.reply, st)
+    assert not missing_categories(full, st) and "1 simulated RF detection" in full
+
+
+def test_complete_answer_is_left_alone():
+    from advisor.template_sitrep import ensure_categories
+
+    st = busy_picture().get_state()
+    text = ("6 drone detections (5 simulated), 2 people seen, 1 RF emitter, 1 acoustic UAV, "
+            "1 change detection, 2 unit positions.")
+    assert ensure_categories(text, st) == text

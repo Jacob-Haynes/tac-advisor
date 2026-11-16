@@ -52,11 +52,11 @@ Set in `/etc/tac-advisor.env`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_BACKEND` | `auto` | `auto`: every configured backend in order (LLM server, then Gemini, then local, then template). `openai_compat`: LLM server, then local, then template. `gemini`: Gemini, then local, then template. `local`: local, then template; never uses the network. `template`: template SITREP only |
+| `LLM_BACKEND` | `auto` | `auto`: every configured backend in order (LLM server, then Gemini, then local, then template). `openai_compat`: LLM server, then local, then template. `ollama` / `openai`: like `openai_compat`, forcing that request shape. `gemini`: Gemini, then local, then template. `local`: local, then template; never uses the network. `template`: template SITREP only |
 | `LLM_URL` | empty | LLM server **base URL, no path**, e.g. `http://isr-hq.local:11434`. See `LLM_API` for which request is sent |
 | `LLM_MODEL` | `qwen3.5:27b` | Model name on that server |
 | `LLM_TIMEOUT_S` | `90` | Per-request timeout. The first query loads the model into memory |
-| `LLM_API` | `auto` | `openai`: OpenAI `POST {LLM_URL}/v1/chat/completions` (llama.cpp server, LM Studio, vLLM, and Ollama too). `ollama`: Ollama's native `POST {LLM_URL}/api/chat` with thinking off, which is much faster for qwen3.5. `auto`: Ollama native when the URL says Ollama (port 11434 or "ollama" in the host name), otherwise OpenAI. If the server answers 404/405, or with the other API's response shape, it tries the other API once and remembers it |
+| `LLM_API` | `auto` | `ollama`: Ollama's native `POST {LLM_URL}/api/chat` with `think: false` (qwen3.5 answers in seconds instead of thinking for over a minute). `openai`: OpenAI `POST {LLM_URL}/v1/chat/completions` (llama.cpp server, LM Studio, vLLM). Against Ollama it also sends `reasoning_effort: "none"`, because Ollama ignores `think` on that endpoint. `auto`: Ollama native when the server is Ollama (port 11434, "ollama" in the host, or `GET /api/version` answers), otherwise OpenAI; on 404/405 or the wrong response shape it tries the other once. Replies are capped at `LLM_MAX_TOKENS` (512). The UI and heartbeat show what answered, e.g. `ollama:qwen3.5:27b` |
 | `LLM_KEEP_ALIVE` | `30m` | Asks Ollama to keep the model loaded between queries |
 | `GEMINI_API_KEY` | empty | Enables cloud mode |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Any Gemini model name |
@@ -64,6 +64,10 @@ Set in `/etc/tac-advisor.env`:
 | `ADVISOR_MODEL` | auto | GGUF filename in the models dir (first `.gguf` found otherwise) |
 
 If a network backend fails (Mac asleep or off the hotspot, no internet, bad key), the next one answers. Then the local GGUF model, and finally the template SITREP. A failed backend is skipped for 2 minutes, so the Pi doesn't wait for a timeout on every query. The UI status and `GET /api/status` show which backend answered (`template:sitrep` for the template). With nothing configured, the UI still runs and queries get the template SITREP; the setup hint is in the log.
+
+### Counts the model can't drop
+
+The context starts with **PICTURE COUNTS**: one line per category in the picture (drones, people/vehicles, RF, acoustic, change, other sensors, unit positions, alerts, messages), counted the same way as the template SITREP and with the SIMULATED/RECORDED labels. The system prompt requires every line in the answer. If a model still leaves a category out (in rehearsal, qwen3.5:27b dropped 5 drone detections), the advisor adds "Counts: …" for the missing ones. On the mesh it shortens the model's text to make room within 200 characters.
 
 ### Template SITREP (offline)
 

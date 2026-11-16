@@ -11,7 +11,9 @@ SYSTEM_PROMPT = (
     "Keep responses brief and formatted for quick reading. Use MGRS grid references where provided. "
     "Refer to units by callsign. Prioritise safety and force protection. "
     "Items tagged [SIMULATED] or [RECORDED] are exercise or replayed data, not live: always say so "
-    "when you report them (e.g. '2 simulated drone detections') and never present them as real."
+    "when you report them (e.g. '2 simulated drone detections') and never present them as real. "
+    "PICTURE COUNTS lists every category in the picture: a SITREP must mention every one of them "
+    "with its count, even briefly; never leave a category out."
 )
 
 
@@ -123,6 +125,9 @@ def build_context(state: dict) -> str:
             )
         sections.append("\n".join(lines))
 
+    from advisor.template_sitrep import counts_block
+
+    block = counts_block(state)
     if not sections:
         return "No tactical data available."
 
@@ -141,4 +146,6 @@ def build_context(state: dict) -> str:
         sections.insert(0, "DATA LABELS: some of this picture is SIMULATED or RECORDED (exercise data). "
                            "Counts: " + "; ".join(summary) + ".")
 
+    if block:
+        sections.insert(0, block)
     return "\n\n".join(sections)

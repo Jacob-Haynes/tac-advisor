@@ -131,3 +131,83 @@ class TemplateBackend:
             except Exception:
                 state = {}
         return build_sitrep(state, compact=max_tokens <= 200)
+
+
+# ── per-category counts the LLM must not drop (rehearsal 3: a real model left out 5 drones) ──
+
+# (key, label, noun, words that count as "mentioned" in an answer)
+CATEGORIES = [
+    ("drones", "Drones", "drone detection", ("drone", "uav", "uas")),
+    ("people", "People/vehicles", "people/vehicle detection", ("person", "people", "pax", "vehicle")),
+    ("rf", "RF", "RF detection", ("rf", "emitter", "radio")),
+    ("acoustic", "Acoustic", "acoustic detection", ("acoustic",)),
+    ("change", "Change", "change detection", ("change",)),
+    ("other", "Other sensors", "other sensor detection", ("sensor",)),
+    ("positions", "Positions", "unit position", ("unit", "position", "callsign")),
+    ("alerts", "Alerts", "alert", ("alert", "sos", "emergency", "casevac")),
+    ("mesh", "Messages", "chat message", ("message", "chat", "msg", "mesh")),
+]
+_PEOPLE = ("PERSON", "PAX", "PEOPLE", "VEHICLE", "CAR", "TRUCK")
+_SOURCE_CAT = {"rf-spectrum": "rf", "acoustic-detector": "acoustic", "change-detect": "change"}
+
+
+def _event_category(e) -> str:
+    src = getattr(e, "source", "")
+    if src in _SOURCE_CAT:
+        return _SOURCE_CAT[src]
+    text = f"{getattr(e, 'callsign', '')} {getattr(e, 'remarks', '')}".upper()
+    if src in ("op-sentry", "fpv-vision") or any(w in text for w in _PEOPLE):
+        return "people"
+    return "other"
+
+
+def category_counts(state: dict) -> list[tuple[str, str, str]]:
+    """[(key, label, phrase)] for every category with a nonzero count, e.g.
+    ("drones", "Drones", "5 simulated drone detections"). Labels carried through (C4.3)."""
+    groups: dict[str, list] = {k: [] for k, *_ in CATEGORIES}
+    groups["drones"] = list(state.get("drones") or [])
+    for d in groups["drones"]:
+        if getattr(d, "source", "") in ("rf-spectrum", "acoustic-detector"):
+            groups[_SOURCE_CAT[d.source]].append(d)
+    for e in state.get("sensor_events") or []:
+        groups[_event_category(e)].append(e)
+    groups["positions"] = list((state.get("positions") or {}).values())
+    groups["alerts"] = list(state.get("alerts") or [])
+    groups["mesh"] = list(state.get("messages") or [])
+    return [(key, label, count_phrase(groups[key], noun)) for key, label, noun, _ in CATEGORIES if groups[key]]
+
+
+def counts_block(state: dict) -> str:
+    """Deterministic pre-summary that goes at the top of the LLM context."""
+    rows = category_counts(state)
+    if not rows:
+        return ""
+    return "PICTURE COUNTS (your answer must mention every line, with its count):\n" + "\n".join(
+        f"  {label}: {phrase}" for _, label, phrase in rows)
+
+
+def missing_categories(text: str, state: dict) -> list[str]:
+    """Phrases for nonzero categories an answer does not mention."""
+    low = text.lower()
+    words = {k: w for k, _, _, w in CATEGORIES}
+    out = []
+    for key, _, phrase in category_counts(state):
+        count = phrase.split()[0]
+        mentioned = any(w in low for w in words[key]) and (count in low or key == "positions")
+        if not mentioned:
+            out.append(phrase)
+    return out
+
+
+def ensure_categories(text: str, state: dict, limit: int | None = None) -> str:
+    """Append any category counts the answer left out, so counts can't be dropped.
+    With ``limit`` (mesh texts) the answer is shortened to make room for them."""
+    missing = missing_categories(text, state)
+    if not missing:
+        return text if limit is None or len(text) <= limit else text[: limit - 3] + "..."
+    tail = " Counts: " + "; ".join(missing) + "."
+    if limit is None:
+        return text.rstrip() + "\n" + tail.strip()
+    room = max(0, limit - len(tail))
+    head = text if len(text) <= room else text[: max(0, room - 3)].rstrip() + "..."
+    return (head + tail)[:limit]

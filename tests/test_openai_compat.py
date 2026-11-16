@@ -19,13 +19,18 @@ class FakeLLMServer:
     """openai=True serves /v1/chat/completions, ollama=True serves /api/chat.
     wrong_shape_v1: /v1 answers 200 with an Ollama-shaped body (a misbehaving proxy)."""
 
-    def __init__(self, openai=True, ollama=False, reject_think=False, wrong_shape_v1=False):
+    def __init__(self, openai=True, ollama=False, reject_think=False, wrong_shape_v1=False, version=False):
         self.requests = []
         outer = self
 
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
+
+            def do_GET(self):
+                if self.path == "/api/version" and version:
+                    return self._send(200, {"version": "0.40.0"})
+                self._send(404, {"error": "not found"})
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -139,3 +144,40 @@ def test_unreachable_server_falls_back_to_local():
     e = LLMEngine(backend="openai_compat", remote=remote, local=FakeBackend("l"))
     assert e.generate("s", "u") == "from l"
     assert e.status()["llm_server_backoff_s"] > 0
+
+
+def test_auto_prefers_native_api_when_api_version_answers(make, monkeypatch):
+    """Ollama on a non-default port: /api/version answers, so auto uses /api/chat with think off."""
+    monkeypatch.delenv("LLM_API", raising=False)
+    s = make(openai=True, ollama=True, version=True)
+    b = OpenAICompatBackend(s.url, model="qwen3.5:27b")
+    assert b.generate("s", "u", 100) == "SITREP: quiet."
+    path, body, _ = s.requests[0]
+    assert path == "/api/chat" and body["think"] is False
+    assert b.label == "ollama:qwen3.5:27b"
+
+
+def test_openai_shape_to_ollama_disables_thinking_and_caps_tokens(make, monkeypatch):
+    monkeypatch.setenv("LLM_MAX_TOKENS", "256")
+    s = make(openai=True, ollama=True, version=True)
+    b = OpenAICompatBackend(s.url, api="openai")
+    assert b.generate("s", "u", 4000) == "SITREP via v1."
+    _, body, _ = s.requests[0]
+    assert body["reasoning_effort"] == "none" and body["max_tokens"] == 256
+    assert b.label.startswith("openai:")
+
+
+def test_openai_shape_to_non_ollama_sends_no_reasoning_effort(make):
+    s = make(openai=True)
+    b = OpenAICompatBackend(s.url, api="openai")
+    b.generate("s", "u", 100)
+    assert "reasoning_effort" not in s.requests[0][1]
+
+
+def test_engine_label_and_ollama_backend_alias(make, monkeypatch):
+    s = make(openai=False, ollama=True)
+    monkeypatch.setenv("LLM_URL", s.url)
+    e = LLMEngine(backend="ollama")
+    assert e.mode == "openai_compat" and e._remote.api == "ollama"
+    assert e.generate("s", "u") == "SITREP: quiet."
+    assert e.last_backend.startswith("ollama:")
