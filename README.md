@@ -61,6 +61,7 @@ Set in `/etc/tac-advisor.env`:
 | `GEMINI_API_KEY` | empty | Enables cloud mode |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Any Gemini model name |
 | `GEMINI_TIMEOUT_S` | `20` | Per-request timeout |
+| `GRID_FORMAT` | `mgrs` | How positions appear in the LLM context: `mgrs` (`30U WB 87427 67248`), `bng` (OS National Grid, `SU 17582 39000`, falls back to MGRS outside GB) or `latlon`. Converted in `advisor/grid.py` (pure Python, no extra deps). The model only ever sees the converted ref, never raw lat/lon, and is told to copy refs verbatim. Each item also gets distance and direction from the nearest friendly unit, else from the OP (`SENSOR_LAT/LON`), e.g. `1.3 km NW of HANGOVER` |
 | `ADVISOR_MODEL` | auto | GGUF filename in the models dir (first `.gguf` found otherwise) |
 
 If a network backend fails (Mac asleep or off the hotspot, no internet, bad key), the next one answers. Then the local GGUF model, and finally the template SITREP. A failed backend is skipped for 2 minutes, so the Pi doesn't wait for a timeout on every query. The UI status and `GET /api/status` show which backend answered (`template:sitrep` for the template). With nothing configured, the UI still runs and queries get the template SITREP; the setup hint is in the log.

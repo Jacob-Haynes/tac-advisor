@@ -1,6 +1,9 @@
 """Build tactical text context from CoT listener state for LLM prompting."""
 
+import os
 import time
+
+from advisor.grid import bearing_distance, grid_format, grid_name, grid_ref, relative
 
 SYSTEM_PROMPT = (
     "You are a tactical advisor for a UK Army Blue Force Tracker system. You provide concise, "
@@ -8,7 +11,11 @@ SYSTEM_PROMPT = (
     "current operational picture including unit positions, alerts, messages, drone detections and "
     "reports from ISR sensors (acoustic, camera OP, change detection, RF spectrum). Treat sensor "
     "detections as unconfirmed unless corroborated, and say which sensor reported them. "
-    "Keep responses brief and formatted for quick reading. Use MGRS grid references where provided. "
+    "Keep responses brief and formatted for quick reading. "
+    "Positions are given as grid references in the format named on the GRID line. Copy each grid "
+    "reference exactly as written, character for character; never compute, shorten, round or invent "
+    "one, and never turn other numbers into a grid reference. If an item says 'no position', say so. "
+    "Relative positions (e.g. '1.2 km NW of HANGOVER') may be quoted as given. "
     "Refer to units by callsign. Prioritise safety and force protection. "
     "Items tagged [SIMULATED] or [RECORDED] are exercise or replayed data, not live: always say so "
     "when you report them (e.g. '2 simulated drone detections') and never present them as real. "
@@ -40,16 +47,55 @@ def _tag(item) -> str:
     return f" [{label}]" if label else ""
 
 
+def _has_pos(item) -> bool:
+    lat, lon = getattr(item, "lat", None), getattr(item, "lon", None)
+    return lat is not None and lon is not None and not (lat == 0 and lon == 0)
+
+
+def _op_position() -> tuple[float, float] | None:
+    """The shared OP position (SENSOR_LAT/SENSOR_LON), if configured."""
+    try:
+        lat = float(os.environ.get("SENSOR_LAT", "").strip())
+        lon = float(os.environ.get("SENSOR_LON", "").strip())
+    except ValueError:
+        return None
+    return (lat, lon) if (lat or lon) else None
+
+
+class _Locator:
+    """Grid ref plus "1.2 km NW of <nearest friendly unit>" (or of the OP) for each item."""
+
+    def __init__(self, positions: list):
+        self.fmt = grid_format()
+        self.units = [p for p in positions if _has_pos(p)]
+        self.op = _op_position()
+
+    def __call__(self, item, own_callsign: str | None = None) -> str:
+        if not _has_pos(item):
+            return "grid=no position"
+        text = f"grid={grid_ref(item.lat, item.lon, self.fmt)}"
+        refs = [(bearing_distance(u.lat, u.lon, item.lat, item.lon)[0], u.lat, u.lon, u.callsign)
+                for u in self.units if u.callsign != own_callsign]
+        if refs:
+            _, rlat, rlon, name = min(refs)
+            return f"{text} ({relative(item.lat, item.lon, rlat, rlon, name)})"
+        if self.op:
+            return f"{text} ({relative(item.lat, item.lon, *self.op, 'the OP')})"
+        return text
+
+
 def build_context(state: dict) -> str:
     """Build a text context block from CotListener state snapshot."""
     sections: list[str] = []
 
-    # Unit positions
     positions = state.get("positions", {})
+    where = _Locator(list(positions.values()))
+
+    # Unit positions
     if positions:
         lines = ["UNIT POSITIONS:"]
         for p in positions.values():
-            parts = [f"  {p.callsign}{_tag(p)}: lat={p.lat:.5f} lon={p.lon:.5f}"]
+            parts = [f"  {p.callsign}{_tag(p)}: {where(p, own_callsign=p.callsign)}"]
             if p.speed is not None:
                 parts.append(f"speed={p.speed:.1f}m/s")
             if p.heading is not None:
@@ -69,7 +115,7 @@ def build_context(state: dict) -> str:
         for a in alerts:
             msg = f": {a.message}" if a.message else ""
             lines.append(
-                f"  {a.callsign}{_tag(a)} at lat={a.lat:.5f} lon={a.lon:.5f}{msg} "
+                f"  {a.callsign}{_tag(a)} at {where(a, own_callsign=a.callsign)}{msg} "
                 f"({_relative_time(a.timestamp)})"
             )
         sections.append("\n".join(lines))
@@ -82,7 +128,7 @@ def build_context(state: dict) -> str:
             src = f" [{d.source}]" if getattr(d, "source", "") else ""
             rem = f" — {_clip(d.remarks)}" if getattr(d, "remarks", "") else ""
             lines.append(
-                f"  {d.callsign or d.uid}{src}{_tag(d)}: lat={d.lat:.5f} lon={d.lon:.5f} "
+                f"  {d.callsign or d.uid}{src}{_tag(d)}: {where(d)} "
                 f"alt={d.alt:.0f}m ({_relative_time(d.timestamp)}){rem}"
             )
         sections.append("\n".join(lines))
@@ -95,7 +141,7 @@ def build_context(state: dict) -> str:
         for e in recent_events:
             rem = f" — {_clip(e.remarks)}" if e.remarks else ""
             lines.append(
-                f"  [{e.source}] {e.callsign}{_tag(e)} ({e.affiliation}): lat={e.lat:.5f} lon={e.lon:.5f} "
+                f"  [{e.source}] {e.callsign}{_tag(e)} ({e.affiliation}): {where(e)} "
                 f"({_relative_time(e.timestamp)}){rem}"
             )
         if len(events) > len(recent_events):
@@ -108,7 +154,7 @@ def build_context(state: dict) -> str:
         lines = ["SENSORS ONLINE:"]
         for a in assets:
             lines.append(
-                f"  [{a.source}] {a.callsign}{_tag(a)}: lat={a.lat:.5f} lon={a.lon:.5f} "
+                f"  [{a.source}] {a.callsign}{_tag(a)}: {where(a)} "
                 f"(last report {_relative_time(a.timestamp)})"
             )
         sections.append("\n".join(lines))
@@ -146,6 +192,7 @@ def build_context(state: dict) -> str:
         sections.insert(0, "DATA LABELS: some of this picture is SIMULATED or RECORDED (exercise data). "
                            "Counts: " + "; ".join(summary) + ".")
 
+    sections.insert(0, f"GRID: {grid_name(where.fmt)}. Copy grid references verbatim; never invent one.")
     if block:
         sections.insert(0, block)
     return "\n\n".join(sections)

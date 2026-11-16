@@ -206,7 +206,8 @@ class OpenAICompatBackend:
     @property
     def label(self) -> str:
         """What actually answered, e.g. "ollama:qwen3.5:27b" or "openai:local-model"."""
-        api = self.last_api or ("ollama" if self.api == "ollama" else "openai" if self.api == "openai" else "llm")
+        api = self.last_api or ("ollama" if self.api == "ollama" or self._is_ollama else
+                                "openai" if self.api == "openai" else "llm")
         return f"{api}:{self.model_name}"
 
     def is_ollama(self) -> bool:
@@ -422,6 +423,21 @@ class LLMEngine:
             if not self.backoff_s(b.name):
                 return b.name
         return "local" if self._local.available and self.mode != "template" else "template"
+
+    @property
+    def active_label(self) -> str:
+        """What would answer now, as the answers name it: "ollama:qwen3.5:27b", "gemini:...",
+        "local:<gguf>" or "template:sitrep" (for the heartbeat; probes the LLM server once)."""
+        primary = self.primary
+        if primary == "openai_compat" and self._remote is not None:
+            if self._remote.last_api is None and self._remote.api not in ("ollama", "openai"):
+                self._remote.is_ollama()
+            return self._remote.label
+        if primary == "gemini" and self._gemini is not None:
+            return f"gemini:{self._gemini.model_name}"
+        if primary == "local":
+            return f"local:{self._local.model_name}"
+        return f"{self._template.name}:{self._template.model_name}"
 
     def status(self) -> dict:
         return {

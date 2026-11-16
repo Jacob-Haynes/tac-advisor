@@ -105,7 +105,7 @@ def main():
             problems.append("no LLM, template SITREP only")
         if link is not None and not getattr(link, "connected", True):
             problems.append("mesh not connected")
-        detail = f"llm {engine.last_backend or primary}" + ("; " + "; ".join(problems) if problems else "")
+        detail = f"llm {engine.active_label}" + ("; " + "; ".join(problems) if problems else "")
         return mode, "degraded" if problems else "ok", detail
 
     heartbeat = Heartbeat("tac-advisor", heartbeat_state, port=args.web_port).start()
