@@ -1,43 +1,26 @@
 """Connect to TAK server TCP, parse CoT stream, maintain tactical state.
 
-OpenTAKServer only streams CoT to a TCP client after that client has sent an
-event with a ``uid`` and ``<contact callsign>`` (that is when OTS binds the
-client's RabbitMQ queue). A purely passive reader gets nothing, so on connect,
-and every ``HELLO_INTERVAL_S``, we send a small SA "hello" whose stale time is
-already reached, so ATAK clients do not draw it on the map.
+The connection is ``advisor.tak_client`` (kit contract v5). OpenTAKServer only relays CoT
+to a TCP client that registered with a ``<contact>`` SA *after* OTS's internal RabbitMQ
+channel for that connection opened, and never re-checks. So the client waits 3 s after each
+connect, then registers as ``isrkit-tac-advisor-<ISR_HOST>`` / ``ADVISOR <ISR_HOST>``
+(callsigns must be unique in OTS), and re-sends that SA every 60 s.
 """
 
 import logging
 import os
 import random
-import socket
 import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from xml.sax.saxutils import quoteattr
+
+from advisor.tak_client import TakClient, build_sa
 
 logger = logging.getLogger(__name__)
 
-
-class CotStreamParser:
-    """Stateful parser that extracts complete CoT <event> elements from a TCP byte stream."""
-
-    def __init__(self):
-        self._buf = ""
-
-    def feed(self, data: str) -> list[str]:
-        self._buf += data
-        events = []
-        while "</event>" in self._buf:
-            end = self._buf.index("</event>") + len("</event>")
-            chunk = self._buf[:end].strip()
-            self._buf = self._buf[end:]
-            start = chunk.rfind("<event")
-            if start >= 0:
-                events.append(chunk[start:])
-        return events
+TAK_REPO, TAK_SHORT = "tac-advisor", "ADVISOR"
+KIT_UID_PREFIX = "isrkit-"  # registration SAs of kit tools (contract v5)
 
 
 @dataclass
@@ -163,22 +146,9 @@ def sensor_source(uid: str, remarks: str = "") -> str:
     return ""
 
 
-def _cot_time(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
 def build_hello(uid: str, callsign: str, now: float | None = None) -> str:
-    """SA event that makes OTS start streaming to us. Already stale, so ATAK will not show it."""
-    now = time.time() if now is None else now
-    t = _cot_time(now)
-    return (
-        f'<event version="2.0" uid={quoteattr(uid)} type="a-f-G-U-C" how="h-g-i-g-o" '
-        f'time="{t}" start="{t}" stale="{t}">'
-        '<point lat="0" lon="0" hae="0" ce="9999999" le="9999999"/>'
-        f"<detail><contact callsign={quoteattr(callsign)}/>"
-        '<takv platform="tac-advisor" device="Raspberry Pi" os="linux" version="1"/>'
-        "</detail></event>"
-    )
+    """The registration SA (contract v5), without a position. Kept for callers of the old name."""
+    return build_sa(uid, callsign, TAK_REPO, None, None, now)
 
 
 class CotListener:
@@ -190,16 +160,15 @@ class CotListener:
     ASSET_STALE_S = 600
     MAX_MESSAGES = 50
     MAX_EVENTS = 100
-    RECONNECT_MIN = 2
-    RECONNECT_MAX = 60
-    HELLO_INTERVAL_S = 60
-    RECV_TIMEOUT_S = 5
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8087, callsign: str | None = None):
         self._host = host
         self._port = port
-        self._callsign = callsign or os.environ.get("ADVISOR_CALLSIGN", "TAC-ADVISOR")
-        self._uid = f"TAC-ADVISOR-{socket.gethostname()}"
+        # callsigns are unique in OTS: the default "ADVISOR <station>" is; an override must be too
+        self._client = TakClient(TAK_REPO, TAK_SHORT, host=host, port=port, on_event=self._process_event,
+                                 callsign=callsign or os.environ.get("ADVISOR_CALLSIGN", "").strip() or None)
+        self._callsign = self._client.callsign
+        self._uid = self._client.uid
         self._lock = threading.Lock()
         self._positions: dict[str, PositionInfo] = {}
         self._messages: list[MessageInfo] = []
@@ -212,15 +181,17 @@ class CotListener:
 
     @property
     def connected(self) -> bool:
-        return self._connected
+        """Registered with the TAK server (contract v5), not just TCP-connected."""
+        return self._connected or self._client.registered.is_set()
 
     def start(self):
         self._running = True
-        threading.Thread(target=self._reader_loop, daemon=True).start()
+        self._client.start()
         threading.Thread(target=self._cleanup_loop, daemon=True).start()
 
     def stop(self):
         self._running = False
+        self._client.stop()
 
     def get_state(self) -> dict:
         with self._lock:
@@ -232,52 +203,6 @@ class CotListener:
                 "sensor_events": sorted(self._events.values(), key=lambda e: e.timestamp),
                 "sensor_assets": list(self._assets.values()),
             }
-
-    def _reader_loop(self):
-        backoff = self.RECONNECT_MIN
-        parser = CotStreamParser()
-
-        while self._running:
-            sock = None
-            try:
-                sock = socket.create_connection((self._host, self._port), timeout=10)
-                # Short recv timeout so we can send the periodic hello on a quiet network
-                # (a timeout is not a disconnect).
-                sock.settimeout(self.RECV_TIMEOUT_S)
-                sock.sendall(build_hello(self._uid, self._callsign).encode())
-                last_hello = time.monotonic()
-                self._connected = True
-                backoff = self.RECONNECT_MIN
-                parser = CotStreamParser()
-                logger.info("Connected to TAK at %s:%d (sent hello as %s)", self._host, self._port, self._uid)
-
-                while self._running:
-                    if time.monotonic() - last_hello > self.HELLO_INTERVAL_S:
-                        sock.sendall(build_hello(self._uid, self._callsign).encode())
-                        last_hello = time.monotonic()
-                    try:
-                        data = sock.recv(65536)
-                    except socket.timeout:
-                        continue
-                    if not data:
-                        logger.warning("TAK server closed the connection")
-                        break
-                    for event_xml in parser.feed(data.decode("utf-8", errors="replace")):
-                        self._process_event(event_xml)
-
-            except (OSError, ConnectionError) as e:
-                logger.warning("TAK connection error: %s (retry in %ds)", e, backoff)
-            finally:
-                self._connected = False
-                if sock:
-                    try:
-                        sock.close()
-                    except Exception:
-                        pass
-
-            if self._running:
-                time.sleep(backoff)
-                backoff = min(backoff * 2, self.RECONNECT_MAX)
 
     def _process_event(self, xml_str: str):
         try:
@@ -297,7 +222,11 @@ class CotListener:
         detail = root.find("detail")
 
         if uid == self._uid:
-            return  # our own hello echoed back
+            return  # our own registration SA
+
+        if uid.startswith(KIT_UID_PREFIX):
+            self._kit_registration(root, uid, lat, lon, point)
+            return
 
         callsign = uid
         remarks_text = ""
@@ -396,6 +325,18 @@ class CotListener:
                     uid=uid, source=source, cot_type=cot_type, callsign=callsign,
                     lat=lat, lon=lon, remarks=remarks_text, label=label,
                 )
+
+    def _kit_registration(self, root, uid: str, lat: float, lon: float, point):
+        """A kit tool's registration SA: a sensor asset if it carries a position, else ignored."""
+        if point.get("ce") == "9999999" or (lat == 0 and lon == 0):
+            return  # no position set (contract C5.2): never drawn, not a unit either
+        takv = root.find("detail/takv")
+        contact = root.find("detail/contact")
+        source = (takv.get("device") if takv is not None else "") or uid[len(KIT_UID_PREFIX):]
+        callsign = contact.get("callsign", uid) if contact is not None else uid
+        with self._lock:
+            self._assets[uid] = SensorAsset(uid=uid, source=source, callsign=callsign, lat=lat, lon=lon,
+                                            remarks="kit tool station")
 
     def _cleanup_loop(self):
         while self._running:

@@ -69,46 +69,6 @@ def test_sitrep_context_mentions_sensors():
     assert "OP1 2xPERSON BRG 045" in ctx and "Prop tone" in ctx
 
 
-class FakeOTS:
-    """Mimics OpenTAKServer's TCP port: streams CoT to a client only after it sends a contact event."""
-
-    def __init__(self, to_send):
-        self.to_send = to_send
-        self.connections = 0
-        self.received = b""
-        self.srv = socket.socket()
-        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.srv.bind(("127.0.0.1", 0))
-        self.srv.listen(5)
-        self.port = self.srv.getsockname()[1]
-        threading.Thread(target=self._serve, daemon=True).start()
-
-    def _serve(self):
-        while True:
-            try:
-                conn, _ = self.srv.accept()
-            except OSError:
-                return
-            self.connections += 1
-            threading.Thread(target=self._client, args=(conn,), daemon=True).start()
-
-    def _client(self, conn):
-        buf = b""
-        while b"<contact" not in buf or b"</event>" not in buf:
-            data = conn.recv(4096)
-            if not data:
-                return
-            buf += data
-        self.received += buf
-        for x in self.to_send:
-            conn.sendall(x.encode())
-        try:
-            while conn.recv(4096):
-                pass
-        except OSError:
-            pass
-
-
 def _wait(cond, timeout=5.0):
     end = time.time() + timeout
     while time.time() < end:
@@ -118,16 +78,41 @@ def _wait(cond, timeout=5.0):
     return False
 
 
-def test_listener_receives_from_ots_after_hello_and_survives_quiet_periods():
-    ots = FakeOTS([PLI, OPSENTRY_PERSON])
+def test_listener_registers_late_enough_to_be_bound_and_receives(monkeypatch):
+    """Against a fake OTS with the real rules (FK drop, bind delay, unique callsign), contract v5."""
+    from advisor.tak_client import TakClient
+    from tests.fake_ots import FakeOTS
+
+    monkeypatch.setenv("TAK_REGISTER_DELAY_S", "0.5")
+    monkeypatch.setenv("ISR_HOST", "isr-pi")
+    ots = FakeOTS(bind_delay=0.3)
     li = CotListener(port=ots.port)
-    li.RECV_TIMEOUT_S = 0.2
     li.start()
+    sender = TakClient("op-sentry", "OPSENTRY", port=ots.port, station="isr-pi", sensor_lat=51.15,
+                       sensor_lon=-1.75)
     try:
+        assert _wait(lambda: li.connected)
+        assert ots.euds.get("isrkit-tac-advisor-isr-pi") == "ADVISOR isr-pi"
+        sender.start()
+        sender.send(PLI)
+        sender.send(OPSENTRY_PERSON)
         assert _wait(lambda: "Alpha-1" in li.get_state()["positions"])
-        assert b'platform="tac-advisor"' in ots.received
-        time.sleep(1.0)  # several recv timeouts with no traffic
-        assert ots.connections == 1 and li.connected
+        assert _wait(lambda: any(e.source == "op-sentry" for e in li.get_state()["sensor_events"]))
+        # the sender's own registration SA shows up as a sensor station, not as a friendly unit
+        assets = li.get_state()["sensor_assets"]
+        assert any(a.uid == "isrkit-op-sentry-isr-pi" and a.source == "op-sentry" for a in assets)
+        assert "OPSENTRY isr-pi" not in li.get_state()["positions"]
+        assert not ots.dropped
     finally:
+        sender.stop()
         li.stop()
-        ots.srv.close()
+        ots.close()
+
+
+def test_kit_registration_without_position_is_ignored():
+    from advisor.tak_client import build_sa
+
+    li = CotListener()
+    li._process_event(build_sa("isrkit-drone-detector-isr-pi", "DRONE-DET isr-pi", "drone-detector", None, None))
+    st = li.get_state()
+    assert st["positions"] == {} and st["sensor_assets"] == []
