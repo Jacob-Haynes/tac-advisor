@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--mesh-port", default=None, help=argparse.SUPPRESS)  # old name for --serial
     parser.add_argument("--model", default=env("ADVISOR_MODEL") or None,
                         help="GGUF model filename (auto-detect by default)")
-    parser.add_argument("--backend", choices=["auto", "gemini", "local"], default=None,
+    parser.add_argument("--backend", choices=["auto", "openai_compat", "gemini", "local"], default=None,
                         help="LLM backend (env LLM_BACKEND, default auto)")
     parser.add_argument("--simulate", action="store_true", help="Use simulated tactical data (no TAK server)")
     args = parser.parse_args()
@@ -84,6 +84,23 @@ def main():
     web_module.mesh_link = link
     app = web_module.create_app()
 
+    from advisor.heartbeat import Heartbeat
+
+    def heartbeat_state():
+        primary = engine.primary
+        mode = "simulate" if args.simulate else ("gemini" if primary == "gemini" else "cpu")
+        problems = []
+        if not listener.connected:
+            problems.append(f"TAK {args.tak_host}:{args.tak_port} not connected")
+        if primary == "none":
+            problems.append("no LLM")
+        if link is not None and not getattr(link, "connected", True):
+            problems.append("mesh not connected")
+        detail = f"llm {engine.last_backend or primary}" + ("; " + "; ".join(problems) if problems else "")
+        return mode, "degraded" if problems else "ok", detail
+
+    heartbeat = Heartbeat("tac-advisor", heartbeat_state, port=args.web_port).start()
+
     log.info("Tactical Advisor started — Web UI at http://0.0.0.0:%d", args.web_port)
 
     try:
@@ -91,6 +108,7 @@ def main():
     except KeyboardInterrupt:
         log.info("Shutting down")
     finally:
+        heartbeat.stop()
         listener.stop()
         if link is not None:
             link.stop()

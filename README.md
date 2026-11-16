@@ -1,6 +1,11 @@
 # Tactical Advisor
 
-LLM tactical advisor for Raspberry Pi 5. It reads the CoT picture from OpenTAKServer (or any TAK server with a plain TCP CoT port) and builds a text context. It answers queries from a web UI and from `ADVISOR:` mesh texts. The LLM is either a local GGUF model (llama.cpp, CPU only, works offline) or Google Gemini (optional cloud mode). The local model is the offline fallback.
+LLM tactical advisor for Raspberry Pi 5. It reads the CoT picture from OpenTAKServer (or any TAK server with a plain TCP CoT port) and builds a text context. It answers queries from a web UI and from `ADVISOR:` mesh texts. The LLM can be:
+- **Ollama on the HQ Mac** over the hotspot (best answers),
+- **Google Gemini** (cloud, needs internet),
+- **a local GGUF model** on the Pi (llama.cpp, CPU only, always available offline).
+
+The local model is the fallback for both.
 
 ## Architecture
 
@@ -45,13 +50,61 @@ Set in `/etc/tac-advisor.env`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_BACKEND` | `auto` | `auto`: Gemini if `GEMINI_API_KEY` is set, else local. `gemini`: cloud first. `local`: never use the network |
+| `LLM_BACKEND` | `auto` | `auto`: every configured backend in order (LLM server, then Gemini, then local). `openai_compat`: LLM server, then local. `gemini`: Gemini, then local. `local`: never use the network |
+| `LLM_URL` | empty | LLM server **base URL, no path**, e.g. `http://isr-hq.local:11434`. The advisor calls Ollama's `/api/chat` with thinking off. If the server has no `/api/chat` (LM Studio, llama.cpp server, vLLM), it uses `/v1/chat/completions` |
+| `LLM_MODEL` | `qwen3.5:27b` | Model name on that server |
+| `LLM_TIMEOUT_S` | `90` | Per-request timeout. The first query loads the model into memory |
+| `LLM_API` | `auto` | Force `ollama` or `openai` |
+| `LLM_KEEP_ALIVE` | `30m` | Asks Ollama to keep the model loaded between queries |
 | `GEMINI_API_KEY` | empty | Enables cloud mode |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Any Gemini model name |
 | `GEMINI_TIMEOUT_S` | `20` | Per-request timeout |
 | `ADVISOR_MODEL` | auto | GGUF filename in the models dir (first `.gguf` found otherwise) |
 
-If a Gemini call fails (no internet, bad key, quota), the answer comes from the local model. Gemini is then skipped for 2 minutes, so an offline Pi doesn't wait for a timeout on every query. The UI status shows which backend answered. With neither a key nor a model, the UI still runs and queries return a setup message.
+If a network backend fails (Mac asleep or off the hotspot, no internet, bad key), the next one answers. The local GGUF model is the last resort. A failed backend is skipped for 2 minutes, so the Pi doesn't wait for a timeout on every query. The UI status and `GET /api/status` show which backend answered. With nothing configured, the UI still runs and queries return a setup message.
+
+## HQ Mac: Ollama Setup (macOS, Apple Silicon)
+
+The HQ Mac (M5 Pro, 64 GB, `isr-hq.local`) runs the LLM for the advisor and a vision model for the other tools.
+
+1. Install Ollama from <https://ollama.com/download> and start the app. qwen3-vl needs Ollama 0.12.7 or newer.
+2. Let the Pi reach it. By default Ollama only listens on localhost:
+   ```bash
+   launchctl setenv OLLAMA_HOST "0.0.0.0:11434"
+   ```
+   Then quit and reopen the Ollama app (from the Ollama FAQ). `launchctl setenv` does not survive a reboot, so run it again after restarting the Mac. If macOS asks whether Ollama may accept incoming connections, allow it.
+3. Pull the models:
+   ```bash
+   ollama pull qwen3.5:27b    # advisor LLM: 17-20 GB, 256K context, thinking (the advisor turns it off)
+   ollama pull qwen3-vl:8b    # vision model for the other tools: 6.2 GB
+   ```
+   Together that is about 26 GB, leaving plenty of the 64 GB for context and macOS. Ollama keeps up to 3 models loaded at once by default. Faster alternative: `qwen3.5:35b` (22 GB, a mixture-of-experts model, quicker per token). On the 32 GB Drone-ops Mac use `qwen3.5:9b` (6.6-7.6 GB). Sizes are from ollama.com/library, checked 2026-11-16.
+4. Check from the Pi:
+   ```bash
+   curl http://isr-hq.local:11434/api/tags
+   ```
+5. In `/etc/tac-advisor.env` on the Pi set `LLM_URL=http://isr-hq.local:11434`, then `sudo systemctl restart tac-advisor`. The first SITREP takes longer while the model loads.
+
+Keep the Mac awake and on mains power during the demo. If it sleeps, the advisor silently falls back to the Pi's local model, and the UI status shows that.
+
+## Running the Advisor on a Mac
+
+The advisor can also run on a Mac on the hotspot:
+
+```bash
+TAK_HOST=isr-pi.local MQTT_HOST=isr-pi.local MQTT_USER=isrkit MQTT_PASS=<isrkit password> \
+  LLM_URL=http://localhost:11434 python -m advisor
+```
+
+RabbitMQ's `guest` account only works from the Pi itself. Off the Pi, use the `isrkit` user that the platform creates.
+
+## Heartbeat
+
+Every 10 s the advisor publishes a retained JSON message to `isrkit/heartbeat/tac-advisor` for the launcher:
+- `status`: `ok`, or `degraded` when TAK, the LLM or the mesh is missing (the reason is in `detail`);
+- `mode`: `gemini` when Gemini is answering, `simulate` in simulation, otherwise `cpu`.
+
+It publishes `stopped` on a clean exit. `HEARTBEAT=0` turns it off.
 
 ## Usage
 
@@ -63,6 +116,7 @@ sudo pi-profiles tac-advisor
 source .venv/bin/activate
 python -m advisor --simulate             # fake picture incl. sensor events, no TAK server
 python -m advisor --backend local        # force the offline model
+LLM_URL=http://isr-hq.local:11434 python -m advisor --simulate   # Mac LLM with a fake picture
 python -m advisor --no-mesh
 ```
 

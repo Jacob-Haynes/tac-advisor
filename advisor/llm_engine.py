@@ -1,27 +1,36 @@
-"""LLM engine: Gemini (cloud, optional) with a local GGUF model (llama.cpp) as the offline fallback.
+"""LLM engine: a network LLM (Ollama on the HQ Mac, or Gemini) with a local GGUF model as fallback.
 
 Backend selection, from the environment (``/etc/tac-advisor.env`` on the Pi):
 
 ``LLM_BACKEND``
-    ``auto`` (default): Gemini if ``GEMINI_API_KEY`` is set, else local.
-    ``gemini``: Gemini first, local model if Gemini fails or is unreachable.
+    ``auto`` (default): every configured backend in order: openai_compat (if ``LLM_URL``
+    is set), then gemini (if ``GEMINI_API_KEY`` is set), then local.
+    ``openai_compat``: the LLM server at ``LLM_URL``, then local.
+    ``gemini``: Gemini, then local.
     ``local``: local GGUF model only, never touches the network.
-``GEMINI_API_KEY``, ``GEMINI_MODEL`` (default ``gemini-3.8-flash``)
-``GEMINI_TIMEOUT_S`` (default 20)
+``LLM_URL``: bare server base URL, no path (e.g. ``http://isr-hq.local:11434``). The
+    engine calls Ollama's ``/api/chat`` (with thinking off) and falls back to the
+    OpenAI-compatible ``/v1/chat/completions`` (LM Studio, llama.cpp server, vLLM).
+    ``LLM_API=ollama|openai`` forces one. ``LLM_MODEL`` (default ``qwen3.5:27b``),
+    ``LLM_TIMEOUT_S`` (default 90), ``LLM_API_KEY`` (optional Bearer token).
+``GEMINI_API_KEY``, ``GEMINI_MODEL`` (default ``gemini-3.8-flash``), ``GEMINI_TIMEOUT_S`` (default 20)
 ``ADVISOR_MODELS_DIR``: where GGUF files live (default ``/var/lib/tac-advisor/models``,
 falling back to ``models/`` next to the code for older installs).
 
-After a Gemini failure the engine uses the local model for ``GEMINI_RETRY_AFTER_S``
-before trying the cloud again, so an offline Pi doesn't wait for a timeout on every query.
+After a network backend fails, it is skipped for ``RETRY_AFTER_S`` before being tried
+again, so a Pi whose laptop or internet is gone doesn't wait for a timeout on every query.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -30,12 +39,14 @@ _DATA_MODELS_DIR = Path("/var/lib/tac-advisor/models")
 _LEGACY_MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 DEFAULT_MODEL = "qwen3-0.6b-q5_k_m.gguf"
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
-GEMINI_RETRY_AFTER_S = 120
+DEFAULT_LLM_MODEL = "qwen3.5:27b"
+RETRY_AFTER_S = 120
+GEMINI_RETRY_AFTER_S = RETRY_AFTER_S  # backwards-compatible name
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 NO_BACKEND_MSG = (
-    "No LLM available. Place a GGUF model in the models directory, or set GEMINI_API_KEY "
-    "in /etc/tac-advisor.env for cloud mode."
+    "No LLM available. Set LLM_URL (Ollama on the HQ Mac) or GEMINI_API_KEY in "
+    "/etc/tac-advisor.env, or place a GGUF model in the models directory."
 )
 
 
@@ -147,19 +158,95 @@ class GeminiBackend:
         return text
 
 
+class OpenAICompatBackend:
+    """An LLM server on the network: Ollama (native /api/chat) or any OpenAI-compatible server."""
+
+    name = "openai_compat"
+    available = True
+
+    def __init__(self, base_url: str, model: str | None = None, timeout_s: float | None = None,
+                 api: str | None = None, api_key: str | None = None) -> None:
+        base = base_url.strip().rstrip("/")
+        for suffix in ("/v1/chat/completions", "/api/chat", "/v1"):
+            if base.endswith(suffix):  # tolerate a URL with a path; the contract is the bare base
+                base = base[: -len(suffix)]
+        self.base_url = base
+        self.model_name = model or os.environ.get("LLM_MODEL") or DEFAULT_LLM_MODEL
+        self.timeout_s = timeout_s or float(os.environ.get("LLM_TIMEOUT_S", "90"))
+        self.api = (api or os.environ.get("LLM_API", "auto")).strip().lower()  # auto | ollama | openai
+        self.api_key = api_key if api_key is not None else os.environ.get("LLM_API_KEY", "")
+        self._send_think = True
+
+    def _post(self, path: str, body: dict) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(self.base_url + path, data=json.dumps(body).encode(), headers=headers)
+        with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+            return json.loads(resp.read())
+
+    def _ollama(self, messages: list, max_tokens: int) -> str:
+        body = {"model": self.model_name, "messages": messages, "stream": False,
+                # keep the model in memory between queries (default Ollama unload is 5 min)
+                "keep_alive": os.environ.get("LLM_KEEP_ALIVE", "30m"),
+                "options": {"temperature": 0.3, "num_predict": max_tokens}}
+        if self._send_think:
+            body["think"] = False  # thinking models (qwen3.5) answer far faster without it
+        try:
+            data = self._post("/api/chat", body)
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and self._send_think:  # model without a thinking switch
+                self._send_think = False
+                return self._ollama(messages, max_tokens)
+            raise
+        return (data.get("message") or {}).get("content") or ""
+
+    def _openai(self, messages: list, max_tokens: int) -> str:
+        data = self._post("/v1/chat/completions", {"model": self.model_name, "messages": messages,
+                                                   "max_tokens": max_tokens, "temperature": 0.3})
+        return ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+    def generate(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        if self.api == "openai":
+            text = self._openai(messages, max_tokens)
+        else:
+            try:
+                text = self._ollama(messages, max_tokens)
+            except urllib.error.HTTPError as e:
+                if self.api != "auto" or e.code not in (404, 405):
+                    raise
+                logger.info("%s has no /api/chat — using the OpenAI-compatible API", self.base_url)
+                self.api = "openai"
+                text = self._openai(messages, max_tokens)
+        text = _THINK_TAG_RE.sub("", text).strip()
+        if not text:
+            raise RuntimeError("LLM server returned no text")
+        return text
+
+
 class LLMEngine:
-    """Picks a backend per request: Gemini when configured and healthy, else the local model."""
+    """Tries network backends in order (each with its own backoff), then the local model."""
 
     def __init__(self, backend: str | None = None, gemini: GeminiBackend | None = None,
-                 local: LocalBackend | None = None) -> None:
+                 local: LocalBackend | None = None, remote: OpenAICompatBackend | None = None) -> None:
         self.mode = (backend or os.environ.get("LLM_BACKEND", "auto")).strip().lower()
-        if self.mode not in ("auto", "gemini", "local"):
+        if self.mode not in ("auto", "openai_compat", "gemini", "local"):
             logger.warning("Unknown LLM_BACKEND=%r, using auto", self.mode)
             self.mode = "auto"
         self._local = local or LocalBackend()
         self._gemini = gemini
-        self._gemini_down_until = 0.0
+        self._remote = remote
+        self._down_until: dict[str, float] = {}
         self.last_backend: str | None = None
+
+        if self._remote is None and self.mode in ("auto", "openai_compat"):
+            url = os.environ.get("LLM_URL", "").strip()
+            if url:
+                self._remote = OpenAICompatBackend(url)
+                logger.info("LLM server backend: %s model %s", self._remote.base_url, self._remote.model_name)
+            elif self.mode == "openai_compat":
+                logger.warning("LLM_BACKEND=openai_compat but LLM_URL is not set — using local model")
 
         if self._gemini is None and self.mode in ("auto", "gemini"):
             key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -172,23 +259,32 @@ class LLMEngine:
             elif self.mode == "gemini":
                 logger.warning("LLM_BACKEND=gemini but GEMINI_API_KEY is not set — using local model")
 
+    def _chain(self) -> list:
+        if self.mode == "local":
+            return []
+        chain = []
+        if self.mode in ("auto", "openai_compat") and self._remote is not None:
+            chain.append(self._remote)
+        if self.mode in ("auto", "gemini") and self._gemini is not None:
+            chain.append(self._gemini)
+        return chain
+
     def load(self, model_name: str | None = None) -> bool:
-        """Load the local model (also the offline fallback in Gemini mode)."""
+        """Load the local model (also the offline fallback for the network backends)."""
         return self._local.load(model_name)
 
-    def _gemini_usable(self) -> bool:
-        return self._gemini is not None and self.mode != "local" and time.monotonic() >= self._gemini_down_until
-
     def generate(self, system_prompt: str, user_prompt: str, max_tokens: int = 512) -> str:
-        if self._gemini_usable():
+        for backend in self._chain():
+            if time.monotonic() < self._down_until.get(backend.name, 0.0):
+                continue
             try:
-                text = self._gemini.generate(system_prompt, user_prompt, max_tokens)
-                self.last_backend = f"gemini:{self._gemini.model_name}"
+                text = backend.generate(system_prompt, user_prompt, max_tokens)
+                self.last_backend = f"{backend.name}:{backend.model_name}"
                 return text
             except Exception as e:
-                self._gemini_down_until = time.monotonic() + GEMINI_RETRY_AFTER_S
-                logger.warning("Gemini failed (%s: %s) — using local model for %ds",
-                               e.__class__.__name__, str(e)[:120], GEMINI_RETRY_AFTER_S)
+                self._down_until[backend.name] = time.monotonic() + RETRY_AFTER_S
+                logger.warning("%s failed (%s: %s) — skipping it for %ds", backend.name,
+                               e.__class__.__name__, str(e)[:120], RETRY_AFTER_S)
 
         if self._local.available:
             try:
@@ -202,22 +298,34 @@ class LLMEngine:
 
     @property
     def is_loaded(self) -> bool:
-        return self._local.available or self._gemini is not None
+        return self._local.available or bool(self._chain())
 
     @property
     def model_name(self) -> str | None:
-        names = []
-        if self._gemini is not None and self.mode != "local":
-            names.append(f"gemini:{self._gemini.model_name}")
+        names = [f"{b.name}:{b.model_name}" for b in self._chain()]
         if self._local.available:
             names.append(f"local:{self._local.model_name}")
         return " + ".join(names) or None
 
+    def backoff_s(self, name: str) -> int:
+        return max(0, int(self._down_until.get(name, 0.0) - time.monotonic()))
+
+    @property
+    def primary(self) -> str:
+        """Which backend should be answering right now: openai_compat | gemini | local | none."""
+        for b in self._chain():
+            if not self.backoff_s(b.name):
+                return b.name
+        return "local" if self._local.available else "none"
+
     def status(self) -> dict:
         return {
             "mode": self.mode,
+            "primary": self.primary,
+            "llm_server": f"{self._remote.base_url} {self._remote.model_name}" if self._remote else None,
+            "llm_server_backoff_s": self.backoff_s("openai_compat"),
             "gemini": self._gemini.model_name if self._gemini is not None else None,
-            "gemini_backoff_s": max(0, int(self._gemini_down_until - time.monotonic())),
+            "gemini_backoff_s": self.backoff_s("gemini"),
             "local": self._local.model_name if self._local.available else None,
             "last_backend": self.last_backend,
         }
