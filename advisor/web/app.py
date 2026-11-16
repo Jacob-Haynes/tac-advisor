@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ class QueryRequest(BaseModel):
 # Set by __main__.py before starting
 engine = None
 listener = None
+mesh_link = None
 
 
 def create_app():
@@ -44,8 +46,17 @@ def create_app():
         context = build_context(state)
         full_prompt = f"{context}\n\nQuery: {req.query}"
 
-        response = engine.generate(SYSTEM_PROMPT, full_prompt)
-        return {"response": response}
+        # LLM calls block for seconds; keep them off the event loop
+        response = await run_in_threadpool(engine.generate, SYSTEM_PROMPT, full_prompt)
+        return {"response": response, "backend": engine.last_backend}
+
+    @app.get("/api/context")
+    async def context():
+        """The exact picture text the LLM is given (useful when demoing)."""
+        from advisor.context_builder import build_context
+
+        state = listener.get_state() if listener else {}
+        return {"context": build_context(state)}
 
     @app.get("/api/status")
     async def status():
@@ -58,6 +69,11 @@ def create_app():
             "messages": len(state.get("messages", [])),
             "alerts": len(state.get("alerts", [])),
             "drones": len(state.get("drones", [])),
+            "sensor_events": len(state.get("sensor_events", [])),
+            "sensor_assets": len(state.get("sensor_assets", [])),
+            "llm": engine.status() if engine else None,
+            "mesh": type(mesh_link).__name__ if mesh_link is not None else None,
+            "mesh_connected": bool(getattr(mesh_link, "connected", False)),
         }
 
     return app
