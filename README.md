@@ -22,7 +22,7 @@ mesh-bridge ←(MQTT meshbus/rx, meshbus/tx)→ Query Handler ──────
 ```
 
 - **TAK.** OpenTAKServer only streams CoT to a TCP client after that client sends an event with a uid and `<contact callsign>`. The listener sends a small "hello" SA on connect and every 60 s. Its stale time is already reached, so ATAK does not draw it. It reconnects with backoff if OTS is down.
-- **Picture.** Friendly PLI and chat, emergencies, UAVs from any source, and detections from the ISR kit's sensor tools all go into the context. Sensor tools are recognised by uid prefix (`ACOUSTIC-`, `opsentry-`, `change-detect-`, `RFSPEC-`, `fpv-vision-`, `DRONE-`) or by naming themselves in the remarks. A SITREP therefore says which sensor reported what. A sensor's own position marker counts as a sensor, not a friendly unit. `GET /api/context` shows the exact text the LLM gets.
+- **Picture.** Friendly PLI and chat, emergencies, UAVs from any source, and detections from the ISR kit's sensor tools (acoustic-detector, op-sentry, change-detect, rf-spectrum and fpv-vision; those repos are private) all go into the context. Sensor tools are recognised by uid prefix (`ACOUSTIC-`, `opsentry-`, `change-detect-`, `RFSPEC-`, `fpv-vision-`, `DRONE-`) or by naming themselves in the remarks. A SITREP therefore says which sensor reported what. A sensor's own position marker counts as a sensor, not a friendly unit. `GET /api/context` shows the exact text the LLM gets.
 - **Mesh.** The radio belongs to [blufor-tracker](https://github.com/Jacob-Haynes/blufor-tracker)'s `mesh-bridge`. The advisor reads `ADVISOR:` texts from MQTT `meshbus/rx` and replies to the sender on `meshbus/tx` (127.0.0.1:1883). `--serial [PORT]` opens a radio directly for standalone use. Never do that while `mesh-bridge` is running.
 
 ## Hardware
@@ -94,7 +94,7 @@ The HQ Mac (M4 Max, 48 GB, `isr-hq.local`) runs the LLM for the advisor and a vi
    ollama pull qwen3.5:27b    # advisor LLM: 17-20 GB, 256K context, thinking (the advisor turns it off)
    ollama pull qwen3-vl:8b    # vision model for the other tools: 6.2 GB
    ```
-   Together that is about 26 GB. On a 48 GB Mac, macOS lets the GPU use about 36 GB of memory by default, so both models plus their context are expected to fit. This has not been tested on the HQ Mac yet; the platform session will confirm it. Ollama keeps up to 3 models loaded at once by default.
+   Together that is about 26 GB. On a 48 GB Mac, macOS lets the GPU use about 36 GB of memory by default, so both models plus their context are expected to fit. This has not been verified on that Mac yet. Ollama keeps up to 3 models loaded at once by default.
 
    If they don't fit (Ollama unloads one model to load the other, or answers are very slow), use a smaller advisor model: `qwen3.5:9b` (6.6-7.6 GB, about 14 GB with qwen3-vl:8b). Pull it and set `LLM_MODEL=qwen3.5:9b` in `/etc/tac-advisor.env` on the Pi. Faster but larger alternative: `qwen3.5:35b` (22 GB, a mixture-of-experts model, quicker per token; about 28 GB with qwen3-vl:8b, which leaves less room for context). On the 32 GB Drone-ops Mac use `qwen3.5:9b`. Sizes are from ollama.com/library, checked 2026-11-16.
 4. Check from the Pi:
@@ -166,3 +166,7 @@ Download a GGUF model into `/var/lib/tac-advisor/models/`:
 pip install -r requirements.txt pytest httpx   # llama-cpp-python is not needed for the tests
 python -m pytest
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
