@@ -93,7 +93,10 @@ def main():
 
     def heartbeat_state():
         primary = engine.primary
-        mode = "simulate" if args.simulate else ("gemini" if primary == "gemini" else "cpu")
+        if args.simulate:
+            mode = "simulate"
+        else:  # llm = served by a remote LLM server (Ollama on the HQ Mac); cpu = Pi's local GGUF
+            mode = {"openai_compat": "llm", "gemini": "gemini"}.get(primary, "cpu")
         problems = []
         if not listener.connected:
             problems.append(f"TAK {args.tak_host}:{args.tak_port} not connected")

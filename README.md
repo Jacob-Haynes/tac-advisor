@@ -102,7 +102,7 @@ RabbitMQ's `guest` account only works from the Pi itself. Off the Pi, use the `i
 
 Every 10 s the advisor publishes a retained JSON message to `isrkit/heartbeat/tac-advisor` for the launcher:
 - `status`: `ok`, or `degraded` when TAK, the LLM or the mesh is missing (the reason is in `detail`);
-- `mode`: `gemini` when Gemini is answering, `simulate` in simulation, otherwise `cpu`.
+- `mode`: `llm` when the LLM server (Ollama on the HQ Mac) is answering, `gemini` for Gemini, `cpu` for the Pi's local model, `simulate` in simulation. The backend and model are in `detail`.
 
 It publishes `stopped` on a clean exit. `HEARTBEAT=0` turns it off.
 
