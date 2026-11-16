@@ -181,3 +181,21 @@ def test_engine_label_and_ollama_backend_alias(make, monkeypatch):
     assert e.mode == "openai_compat" and e._remote.api == "ollama"
     assert e.generate("s", "u") == "SITREP: quiet."
     assert e.last_backend.startswith("ollama:")
+
+
+def test_tolerates_raw_control_characters_in_json(monkeypatch):
+    """Ollama 0.40 put raw control chars inside a JSON string (thinking text); parse anyway."""
+    import io
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    body = b'{"choices":[{"message":{"content":"OK","reasoning":"a' + bytes([10, 9, 1]) + b'b"}}]}'
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: Resp(body))
+    b = OpenAICompatBackend("http://h:1", api="openai")
+    b._is_ollama = False
+    assert b.generate("s", "u", 10) == "OK"

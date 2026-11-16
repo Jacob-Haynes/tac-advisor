@@ -231,7 +231,9 @@ class OpenAICompatBackend:
             headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(self.base_url + path, data=json.dumps(body).encode(), headers=headers)
         with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-            return json.loads(resp.read())
+            # strict=False: Ollama can put raw control characters inside JSON strings
+            # (seen in thinking text on /v1/chat/completions), which strict json.loads rejects
+            return json.loads(resp.read(), strict=False)
 
     def _ollama(self, messages: list, max_tokens: int) -> str:
         body = {"model": self.model_name, "messages": messages, "stream": False,
