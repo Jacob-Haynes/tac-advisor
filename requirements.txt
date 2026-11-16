@@ -3,3 +3,5 @@ fastapi
 uvicorn[standard]
 websockets
 meshtastic
+paho-mqtt>=2.0
+google-genai
