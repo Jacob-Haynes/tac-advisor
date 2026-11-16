@@ -160,7 +160,7 @@ The answer goes back to the sender as a mesh text under 200 characters. Queries 
 
 ## ATAK Chat Queries
 
-From ATAK on the TAK server (Wi-Fi or hotspot), send `ADVISOR: SITREP` (or `@ADVISOR sitrep`, any case) to **All Chat Rooms**, or a direct message to the contact `ADVISOR <host>`. The advisor answers in the same place: in All Chat Rooms, or as a DM back to you. The reply is the full answer, not trimmed to 200 characters, and comes from its registered identity (`isrkit-tac-advisor-<ISR_HOST>`, callsign `ADVISOR <ISR_HOST>`).
+From ATAK on the TAK server (Wi-Fi or hotspot), send `ADVISOR: SITREP` (or `@ADVISOR sitrep`, any case) to **All Chat Rooms**, or a direct message to the contact `ADVISOR <host>`. The advisor answers in the same place: in All Chat Rooms, or as a DM back to you. The reply is the full answer, not trimmed to 200 characters. OpenTAKServer 1.8.3 stores chat text in a 255-character column and drops anything longer, so a long answer arrives as several messages, `SITREP 1/5 …`, each at most 250 characters, split at line or sentence breaks. It comes from its registered identity (`isrkit-tac-advisor-<ISR_HOST>`, callsign `ADVISOR <ISR_HOST>`).
 
 It ignores its own messages, other kit tools, and chat without the prefix. GeoChat that OTS made from a mesh text (`<contact endpoint="MQTT">`) is left to the mesh handler, which answers over the radio. The same query from the same sender arriving over both mesh and chat within 30 s is answered once. `GEOCHAT=0` turns chat queries off. Code: `advisor/geochat.py`.
 

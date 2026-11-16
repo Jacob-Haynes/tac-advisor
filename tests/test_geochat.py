@@ -6,7 +6,9 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from advisor.geochat import GeoChatResponder, build_reply, chat_text, parse_geochat
+from xml.sax.saxutils import escape
+
+from advisor.geochat import GeoChatResponder, build_reply, chat_text, parse_geochat, split_chat
 from advisor.mesh_link import InboundText
 from advisor.mesh_query import MeshQueryHandler, RecentQueries, extract_query
 
@@ -84,6 +86,7 @@ def responder(**kw):
     sent = []
     r = GeoChatResponder(kw.pop("engine", FakeEngine()), FakeListener(), OWN_UID, OWN_CS, send=sent.append,
                          position=lambda: (51.15, -1.75), hold_s=0, recent=kw.pop("recent", RecentQueries()))
+    r.part_gap_s = 0
     return r, sent
 
 
@@ -129,7 +132,10 @@ def test_reply_to_all_chat_rooms_is_full_length_from_our_identity():
     assert ev.find("detail/link").get("uid") == OWN_UID
     assert ev.find("detail/marti") is None  # no <dest>: OTS routes it to everyone
     assert ev.find("detail/__serverdestination").get("destinations").endswith(OWN_UID)
-    assert ev.find("detail/remarks").text == LONG and len(LONG) > 200  # no mesh trim
+    assert len(LONG) > 255 and len(sent) == 2  # over OTS's geochat.remarks varchar(255): two parts
+    texts = [ET.fromstring(x).find("detail/remarks").text for x in sent]
+    assert texts[0].startswith("SITREP 1/2 ") and texts[1].startswith("SITREP 2/2 ")
+    assert " ".join(t.split(" ", 2)[2] for t in texts) == LONG  # nothing lost, no mesh trim
     assert ev.get("stale") > ev.get("start")
 
 
@@ -172,7 +178,7 @@ def test_mesh_first_then_geochat_echo_answered_once():
 def test_geochat_first_then_mesh_echo_answered_once():
     recent = RecentQueries()
     r, sent = responder(recent=recent)
-    assert r.handle(parse_geochat(ALL_CHAT, OWN_UID, OWN_CS)) and len(sent) == 1
+    assert r.handle(parse_geochat(ALL_CHAT, OWN_UID, OWN_CS)) and r.replies == 1
     mesh = MeshQueryHandler(FakeEngine(), FakeListener(), recent=recent)
     mesh.on_text(InboundText(from_id="!5f1c2b9e", text="advisor: SITREP", long_name="HANGOVER"))
     assert mesh._queue.qsize() == 0
@@ -183,7 +189,7 @@ def test_different_senders_both_answered():
     mesh = MeshQueryHandler(FakeEngine(), FakeListener(), recent=recent)
     mesh.on_text(InboundText(from_id="!a1a1a1a1", text="ADVISOR: sitrep", long_name="Alpha 1"))
     r, sent = responder(recent=recent)
-    assert r.handle(parse_geochat(ALL_CHAT, OWN_UID, OWN_CS)) and len(sent) == 1
+    assert r.handle(parse_geochat(ALL_CHAT, OWN_UID, OWN_CS)) and r.replies == 1
 
 
 def test_error_text_never_reaches_chat_and_markdown_is_stripped():
@@ -223,9 +229,10 @@ def test_end_to_end_through_fake_ots(monkeypatch):
             except socket.timeout:
                 break
         assert b'senderCallsign="ADVISOR isr-pi"' in got and b"30U WB 87427 67248" in got
-        assert r.sent == 1
+        assert _until(lambda: r.sent == 2)  # LONG is two parts
         time.sleep(0.5)
-        assert r.sent == 1  # no loop on our own reply
+        assert r.replies == 1 and r.sent == 2  # no loop on our own reply
+        assert not ots.nacked and len(ots.geochats) == 3  # the query + 2 parts
     finally:
         phone.close()
         r.stop()
@@ -240,3 +247,79 @@ def _until(cond, timeout=5.0):
             return True
         time.sleep(0.02)
     return False
+
+
+SITREP_1139 = (
+    "SITREP 2031Z (SIMULATED data in picture).\n"
+    "1. Friendly: HANGOVER at 30U WB 87427 67248, battery 81%, active. Bravo-2 [SIMULATED] at "
+    "30U WB 88112 67903, 900 m NE of HANGOVER.\n"
+    "2. Drones: 5 simulated drone detections (drone-detector). UAV SIM-1581F5 at 30U WB 86790 68301, "
+    "1.3 km NW of HANGOVER, alt 120 m; operator at 30U WB 86512 68420. UAV SIM-2A77 at "
+    "30U WB 89001 66012, 2.0 km SE of HANGOVER. Three further tracks drifting north at low level; "
+    "all labelled SIMULATED, none corroborated.\n"
+    "3. Sensors: 2 people/vehicle detections (1 recorded): op-sentry OP1 reports 2xPERSON bearing 045; "
+    "fpv-vision SPOT 161502 [RECORDED] SALUTE from recorded footage.\n"
+    "4. Alerts: none. Messages: 3 chat messages, latest from HANGOVER.\n"
+    "5. Assessment: no confirmed hostile activity. Simulated UAV pattern consistent with a "
+    "reconnaissance orbit NW of HANGOVER.\n"
+    "6. Recommendations: maintain OP; task acoustic sensor to the NW arc; report any live UAV to HQ "
+    "immediately; confirm SIMULATED items are excluded from the real picture before handover.")
+
+
+def test_1139_char_sitrep_parts_are_accepted_by_ots():
+    text = (SITREP_1139 + "\n7. Next SITREP at 2100Z or on any change; all stations acknowledge "
+            "receipt and report status, ammunition and water states.")[:1139]
+    assert len(text) == 1139
+    parts = split_chat(text)
+    assert len(parts) >= 5 and all(len(escape(p)) <= 250 for p in parts)
+    assert [p.split(" ", 2)[1] for p in parts] == [f"{i}/{len(parts)}" for i in range(1, len(parts) + 1)]
+    assert "".join(p.split(" ", 2)[2] for p in parts).replace(" ", "").replace("\n", "") == \
+        text.replace(" ", "").replace("\n", "")  # nothing lost or reordered
+
+    from tests.fake_ots import FakeOTS
+
+    ots = FakeOTS(bind_delay=0)
+    s = socket.create_connection(("127.0.0.1", ots.port))
+    try:
+        from advisor.tak_client import build_sa
+
+        s.sendall(build_sa(OWN_UID, OWN_CS, "tac-advisor", 51.15, -1.75).encode())
+        msg = parse_geochat(ALL_CHAT, OWN_UID, OWN_CS)
+        uids = []
+        for p in parts:
+            xml = build_reply(OWN_UID, OWN_CS, msg, p)
+            uids.append(ET.fromstring(xml).get("uid"))
+            s.sendall(xml.encode())
+        assert _until(lambda: len(ots.geochats) == len(parts))
+        assert not ots.nacked and len(set(uids)) == len(parts)
+    finally:
+        s.close()
+        ots.close()
+
+
+def test_fake_ots_nacks_an_unsplit_long_geochat():
+    """The Pi failure: remarks over 255 -> StringDataRightTruncation -> nacked, never relayed."""
+    from tests.fake_ots import FakeOTS
+    from advisor.tak_client import build_sa
+
+    ots = FakeOTS(bind_delay=0)
+    s = socket.create_connection(("127.0.0.1", ots.port))
+    try:
+        s.sendall(build_sa(PHONE, "HANGOVER", "ATAK-CIV", 51.15, -1.75).encode())
+        s.sendall(ALL_CHAT.split("?>", 1)[1].replace("ADVISOR: SITREP", "x" * 300).encode())
+        assert _until(lambda: ots.nacked)
+        assert "character varying(255)" in ots.nacked[0] and not ots.geochats
+    finally:
+        s.close()
+        ots.close()
+
+
+def test_split_keeps_short_answers_whole_and_cuts_unbroken_text():
+    assert split_chat("SITREP: all quiet.") == ["SITREP: all quiet."]
+    parts = split_chat("A" * 600 + " & <done>", label="ADVISOR")
+    assert all(len(escape(p)) <= 250 for p in parts) and parts[0].startswith("ADVISOR 1/")
+
+
+def test_reply_never_exceeds_ots_limit_even_unsplit():
+    xml = build_reply(OWN_UID, OWN_CS, parse_geochat(ALL_CHAT, OWN_UID, OWN_CS), "y" * 400)
+    assert len(ET.fromstring(xml).find("detail/remarks").text) <= 250

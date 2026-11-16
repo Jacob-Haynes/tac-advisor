@@ -33,13 +33,17 @@ Loops and duplicates: our own messages, other kit tools, and anything without th
 ``ADVISOR:``/``@ADVISOR`` prefix are ignored. GeoChat that OTS made from a mesh text
 (``<contact endpoint="MQTT">``) is left to the mesh handler, which answers over the radio. Any
 query also seen on the mesh shortly before or after (the bridge echo) is answered once only.
-GeoChat replies carry the full SITREP (no 200-character mesh limit).
+GeoChat replies carry the full SITREP (no 200-character mesh limit), but OTS 1.8.3 stores
+``geochat.remarks`` as ``varchar(255)`` and nacks (never relays) a longer one, so a long answer
+is sent as several messages, "SITREP 1/5 ...", each with remarks of at most 250 characters
+after XML escaping, split on line, then sentence, then word boundaries, about 300 ms apart.
 """
 
 from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
@@ -49,6 +53,7 @@ from xml.sax.saxutils import escape, quoteattr
 
 from advisor.context_builder import SYSTEM_PROMPT, build_context
 from advisor.mesh_query import RECENT, extract_query, looks_like_error
+from advisor.tak_client import OTS_FIELD_MAX, ots_fit
 from advisor.template_sitrep import build_sitrep, ensure_categories
 
 logger = logging.getLogger(__name__)
@@ -58,6 +63,8 @@ KIT_UID_PREFIX = "isrkit-"
 HOLD_S = 3.0  # wait for a mesh copy of the same query before answering here
 MAX_PENDING = 5
 CHAT_STALE_S = 24 * 3600
+PART_GAP_S = 0.3
+REMARKS_MAX = OTS_FIELD_MAX  # 250: under OTS's geochat.remarks varchar(255)
 CHAT_STYLE = ("\n\nAnswer for an ATAK chat message: plain text, no markdown, short lines; "
               "a full SITREP is fine.")
 
@@ -109,11 +116,69 @@ def _iso(t: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + f".{int(t % 1 * 1000):03d}Z"
 
 
+def _xml_len(text: str) -> int:
+    return len(escape(text))
+
+
+def _pieces(text: str, room: int):
+    """(separator, piece) units no longer than ``room`` (escaped): lines, else sentences,
+    else words, else hard cuts."""
+    for line in text.split("\n"):
+        if _xml_len(line) <= room:
+            yield "\n", line
+            continue
+        sep = "\n"
+        for sentence in re.split(r"(?<=[.!?;])\s+", line):
+            if _xml_len(sentence) <= room:
+                yield sep, sentence
+            else:
+                for word in sentence.split(" "):
+                    while _xml_len(word) > room:
+                        cut = room
+                        while _xml_len(word[:cut]) > room:
+                            cut -= 1
+                        yield sep, word[:cut]
+                        sep, word = " ", word[cut:]
+                    yield sep, word
+                    sep = " "
+            sep = " "
+
+
+def split_chat(text: str, label: str = "SITREP", limit: int = REMARKS_MAX) -> list[str]:
+    """``text`` as one message if it fits in ``limit`` escaped characters, else as parts
+    "LABEL 1/n ..." that each do."""
+    text = text.strip()
+    if _xml_len(text) <= limit:
+        return [text]
+    prefix_room = len(f"{label} 99/99 ")
+    room = limit - prefix_room
+    parts, current = [], ""
+    for sep, piece in _pieces(text, room):
+        if not piece and sep == " ":
+            continue
+        candidate = current + sep + piece if current else piece
+        if _xml_len(candidate) <= room:
+            current = candidate
+        else:
+            if current.strip():
+                parts.append(current.strip())
+            current = piece
+    if current.strip():
+        parts.append(current.strip())
+    n = len(parts)
+    return [f"{label} {i}/{n} {p}" for i, p in enumerate(parts, 1)]
+
+
+def reply_label(query: str) -> str:
+    return "SITREP" if "sitrep" in query.lower() else "ADVISOR"
+
+
 def build_reply(own_uid: str, own_callsign: str, to: GeoChatMsg, text: str,
                 lat: float | None = None, lon: float | None = None, now: float | None = None) -> str:
     """GeoChat CoT from us: to the same chat room, or a DM back to the sender."""
     now = time.time() if now is None else now
     msg_id = str(uuid.uuid4())
+    text = ots_fit(text, "GeoChat remarks")  # split_chat keeps parts under this; last-resort cut
     if to.direct:
         room, room_id = to.sender_callsign, to.sender_uid
         dest = f'<marti><dest callsign={quoteattr(to.sender_callsign)}/></marti>'
@@ -124,6 +189,9 @@ def build_reply(own_uid: str, own_callsign: str, to: GeoChatMsg, text: str,
         point = f'<point lat="{lat:.7f}" lon="{lon:.7f}" hae="9999999.0" ce="9999999.0" le="9999999.0"/>'
     else:
         point = '<point lat="0" lon="0" hae="9999999.0" ce="9999999.0" le="9999999.0"/>'
+    room, room_id = ots_fit(room, "GeoChat chatroom"), ots_fit(room_id, "GeoChat chatroom id")
+    for value in (own_uid, own_callsign, room, room_id, f"GeoChat.{own_uid}.{room_id}.{msg_id}"):
+        assert len(value) <= 255, f"GeoChat field over OTS varchar(255): {value[:40]}..."
     t = _iso(now)
     return (
         f'<event version="2.0" uid={quoteattr(f"GeoChat.{own_uid}.{room_id}.{msg_id}")} type="b-t-f" '
@@ -170,7 +238,9 @@ class GeoChatResponder:
         self._queue: queue.Queue[GeoChatMsg] = queue.Queue(maxsize=MAX_PENDING)
         self._seen: dict[str, float] = {}
         self._running = False
-        self.sent = 0
+        self.sent = 0  # GeoChat messages sent
+        self.replies = 0  # queries answered (a reply may be several messages)
+        self.part_gap_s = PART_GAP_S
 
     def start(self):
         self._running = True
@@ -228,10 +298,15 @@ class GeoChatResponder:
 
     def reply(self, msg: GeoChatMsg, text: str):
         lat, lon = self._position()
-        self._send(build_reply(self.own_uid, self.own_callsign, msg, text, lat, lon))
-        self.sent += 1
-        logger.info("GeoChat reply to %s (%s, %d chars)", msg.sender_callsign,
-                    "DM" if msg.direct else msg.chatroom, len(text))
+        parts = split_chat(text, reply_label(extract_query(msg.text) or ""))
+        for i, part in enumerate(parts):
+            if i:
+                time.sleep(self.part_gap_s)  # keep them in order in ATAK
+            self._send(build_reply(self.own_uid, self.own_callsign, msg, part, lat, lon))
+            self.sent += 1
+        self.replies += 1
+        logger.info("GeoChat reply to %s (%s, %d chars in %d message%s)", msg.sender_callsign,
+                    "DM" if msg.direct else msg.chatroom, len(text), len(parts), "" if len(parts) == 1 else "s")
 
     def handle(self, msg: GeoChatMsg) -> bool:
         """Answer one queued query unless the mesh already has it. Returns True if replied."""
