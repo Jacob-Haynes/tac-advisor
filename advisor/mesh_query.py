@@ -13,6 +13,7 @@ import threading
 
 from advisor.context_builder import SYSTEM_PROMPT, build_context
 from advisor.mesh_link import InboundText
+from advisor.template_sitrep import build_sitrep
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,15 @@ def extract_query(text: str) -> str | None:
         return None
     query = stripped[len(ADVISOR_PREFIX):].strip()
     return query or None
+
+
+_ERROR_MARKERS = ("no llm available", "error:", "llm_url", "gemini_api_key", "/etc/tac-advisor.env",
+                  "traceback", "llm generation failed")
+
+
+def looks_like_error(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in _ERROR_MARKERS)
 
 
 def shorten(response: str, limit: int = MAX_RESPONSE_LEN) -> str:
@@ -71,10 +81,22 @@ class MeshQueryHandler:
             self._reply(msg, "ADVISOR busy, try again shortly")
 
     def answer(self, msg: InboundText) -> str:
+        """Reply text for the mesh. Never setup or error text: those are logged and the
+        offline template SITREP is sent instead (rehearsal TA-1)."""
         query = extract_query(msg.text) or ""
-        context = build_context(self._listener.get_state())
-        prompt = f"{context}\n\nQuery from {msg.display}: {query}{MESH_STYLE}"
-        return shorten(self._engine.generate(SYSTEM_PROMPT, prompt, max_tokens=160))
+        state = self._listener.get_state()
+        try:
+            context = build_context(state)
+            prompt = f"{context}\n\nQuery from {msg.display}: {query}{MESH_STYLE}"
+            text = shorten(self._engine.generate(SYSTEM_PROMPT, prompt, max_tokens=160))
+        except Exception:
+            logger.exception("Advisor failed to answer %r", query)
+            text = ""
+        if not text or looks_like_error(text):
+            if text:
+                logger.warning("Not sending setup/error text over the mesh: %s", text)
+            text = shorten(build_sitrep(state, compact=True))
+        return text
 
     def _reply(self, msg: InboundText, text: str):
         if self._link is None:
@@ -92,4 +114,4 @@ class MeshQueryHandler:
             try:
                 self._reply(msg, self.answer(msg))
             except Exception:
-                logger.exception("Failed to answer mesh query from %s", msg.from_id)
+                logger.exception("Failed to answer mesh query from %s", msg.from_id)  # nothing sent

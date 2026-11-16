@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument("--mesh-port", default=None, help=argparse.SUPPRESS)  # old name for --serial
     parser.add_argument("--model", default=env("ADVISOR_MODEL") or None,
                         help="GGUF model filename (auto-detect by default)")
-    parser.add_argument("--backend", choices=["auto", "openai_compat", "gemini", "local"], default=None,
+    parser.add_argument("--backend", choices=["auto", "openai_compat", "gemini", "local", "template"], default=None,
                         help="LLM backend (env LLM_BACKEND, default auto)")
     parser.add_argument("--simulate", action="store_true", help="Use simulated tactical data (no TAK server)")
     args = parser.parse_args()
@@ -54,7 +54,7 @@ def main():
     engine = LLMEngine(backend=args.backend)
     engine.load(args.model)
     if not engine.is_loaded:
-        log.warning("No LLM backend available — the UI will run but queries return a setup message")
+        log.warning("No LLM backend available: queries get the offline template SITREP")
 
     # CoT listener
     if args.simulate:
@@ -64,6 +64,7 @@ def main():
         from advisor.cot_listener import CotListener
         listener = CotListener(host=args.tak_host, port=args.tak_port)
     listener.start()
+    engine.set_state_provider(listener.get_state)  # for the offline template SITREP
 
     # Mesh query handler (meshbus by default; the bridge owns the radio)
     link = None
@@ -100,8 +101,8 @@ def main():
         problems = []
         if not listener.connected:
             problems.append(f"TAK {args.tak_host}:{args.tak_port} not connected")
-        if primary == "none":
-            problems.append("no LLM")
+        if primary == "template":
+            problems.append("no LLM, template SITREP only")
         if link is not None and not getattr(link, "connected", True):
             problems.append("mesh not connected")
         detail = f"llm {engine.last_backend or primary}" + ("; " + "; ".join(problems) if problems else "")

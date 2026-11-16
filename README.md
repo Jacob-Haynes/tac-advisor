@@ -3,9 +3,10 @@
 LLM tactical advisor for Raspberry Pi 5. It reads the CoT picture from OpenTAKServer (or any TAK server with a plain TCP CoT port) and builds a text context. It answers queries from a web UI and from `ADVISOR:` mesh texts. The LLM can be:
 - **Ollama on the HQ Mac** over the hotspot (best answers),
 - **Google Gemini** (cloud, needs internet),
-- **a local GGUF model** on the Pi (llama.cpp, CPU only, always available offline).
+- **a local GGUF model** on the Pi (llama.cpp, CPU only, always available offline),
+- **the offline template SITREP**: no model at all. It counts the picture (positions, alerts by type, drone and sensor detections by source, last-seen times) and is always the last resort.
 
-The local model is the fallback for both.
+So a query always gets an answer: setup and error messages go to the log, never to the mesh or the user.
 
 ## Architecture
 
@@ -13,7 +14,8 @@ The local model is the fallback for both.
 OpenTAKServer ←(TCP 8087, CoT)→ CoT Listener → Context Builder ─┐
    ↑ ATAK PLI/chat, drone-detector,                              ↓
    ↑ acoustic, op-sentry, change-detect, rf-spectrum      LLM Engine ── Gemini (if GEMINI_API_KEY)
-                                                                  │  └─ local GGUF (offline fallback)
+                                                                  │  ├─ local GGUF (offline fallback)
+                                                                  │  └─ template SITREP (no model, last resort)
 mesh-bridge ←(MQTT meshbus/rx, meshbus/tx)→ Query Handler ───────┤
                                                                   ↓
                                                          Web UI (port 8090)
@@ -50,18 +52,32 @@ Set in `/etc/tac-advisor.env`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_BACKEND` | `auto` | `auto`: every configured backend in order (LLM server, then Gemini, then local). `openai_compat`: LLM server, then local. `gemini`: Gemini, then local. `local`: never use the network |
-| `LLM_URL` | empty | LLM server **base URL, no path**, e.g. `http://isr-hq.local:11434`. The advisor calls Ollama's `/api/chat` with thinking off. If the server has no `/api/chat` (LM Studio, llama.cpp server, vLLM), it uses `/v1/chat/completions` |
+| `LLM_BACKEND` | `auto` | `auto`: every configured backend in order (LLM server, then Gemini, then local, then template). `openai_compat`: LLM server, then local, then template. `gemini`: Gemini, then local, then template. `local`: local, then template; never uses the network. `template`: template SITREP only |
+| `LLM_URL` | empty | LLM server **base URL, no path**, e.g. `http://isr-hq.local:11434`. See `LLM_API` for which request is sent |
 | `LLM_MODEL` | `qwen3.5:27b` | Model name on that server |
 | `LLM_TIMEOUT_S` | `90` | Per-request timeout. The first query loads the model into memory |
-| `LLM_API` | `auto` | Force `ollama` or `openai` |
+| `LLM_API` | `auto` | `openai`: OpenAI `POST {LLM_URL}/v1/chat/completions` (llama.cpp server, LM Studio, vLLM, and Ollama too). `ollama`: Ollama's native `POST {LLM_URL}/api/chat` with thinking off, which is much faster for qwen3.5. `auto`: Ollama native when the URL says Ollama (port 11434 or "ollama" in the host name), otherwise OpenAI. If the server answers 404/405, or with the other API's response shape, it tries the other API once and remembers it |
 | `LLM_KEEP_ALIVE` | `30m` | Asks Ollama to keep the model loaded between queries |
 | `GEMINI_API_KEY` | empty | Enables cloud mode |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Any Gemini model name |
 | `GEMINI_TIMEOUT_S` | `20` | Per-request timeout |
 | `ADVISOR_MODEL` | auto | GGUF filename in the models dir (first `.gguf` found otherwise) |
 
-If a network backend fails (Mac asleep or off the hotspot, no internet, bad key), the next one answers. The local GGUF model is the last resort. A failed backend is skipped for 2 minutes, so the Pi doesn't wait for a timeout on every query. The UI status and `GET /api/status` show which backend answered. With nothing configured, the UI still runs and queries return a setup message.
+If a network backend fails (Mac asleep or off the hotspot, no internet, bad key), the next one answers. Then the local GGUF model, and finally the template SITREP. A failed backend is skipped for 2 minutes, so the Pi doesn't wait for a timeout on every query. The UI status and `GET /api/status` show which backend answered (`template:sitrep` for the template). With nothing configured, the UI still runs and queries get the template SITREP; the setup hint is in the log.
+
+### Template SITREP (offline)
+
+Built straight from the CoT picture, with no model. On the mesh it fits in one text:
+
+```
+SITREP 1522Z (offline, no LLM); 5 units, 5 active; 2 simulated drone detections (drone-detector 2); 3 sensor detections (1 recorded) (op-sentry 2, fpv-vision 1); last 12s ago
+```
+
+The web UI gets a longer version with one line each for units, alerts, drones and sensors.
+
+### Simulated and recorded data
+
+Sibling tools label exercise data (kit contract C4.3): CoT remarks start `SIMULATED: ` or `RECORDED: `, or callsigns start `SIM-`. The advisor tags those items `[SIMULATED]` / `[RECORDED]` in the LLM context, adds a count line ("2 simulated drone detections") and tells the model to say so. The template SITREP counts them the same way. `--simulate` labels all its own fake data as simulated.
 
 ## HQ Mac: Ollama Setup (macOS, Apple Silicon)
 

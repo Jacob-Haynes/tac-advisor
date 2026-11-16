@@ -39,12 +39,15 @@ def test_local_mode_never_calls_gemini():
     assert e.generate("s", "u") == "from l" and g.calls == 0
 
 
-def test_no_backend_message(monkeypatch):
+def test_no_backend_gives_template_sitrep_not_setup_text(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_URL", raising=False)
     l = FakeBackend("l")
     l.available = False
     e = LLMEngine(backend="auto", local=l)
-    assert e.generate("s", "u") == NO_BACKEND_MSG
+    out = e.generate("s", "u")
+    assert out != NO_BACKEND_MSG and "LLM_URL" not in out and out.startswith("OFFLINE SITREP")
+    assert e.last_backend == "template:sitrep" and e.primary == "template"
     assert not e.is_loaded
 
 

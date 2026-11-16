@@ -9,7 +9,9 @@ SYSTEM_PROMPT = (
     "reports from ISR sensors (acoustic, camera OP, change detection, RF spectrum). Treat sensor "
     "detections as unconfirmed unless corroborated, and say which sensor reported them. "
     "Keep responses brief and formatted for quick reading. Use MGRS grid references where provided. "
-    "Refer to units by callsign. Prioritise safety and force protection."
+    "Refer to units by callsign. Prioritise safety and force protection. "
+    "Items tagged [SIMULATED] or [RECORDED] are exercise or replayed data, not live: always say so "
+    "when you report them (e.g. '2 simulated drone detections') and never present them as real."
 )
 
 
@@ -31,6 +33,11 @@ def _relative_time(ts: float) -> str:
     return f"{diff // 3600}h ago"
 
 
+def _tag(item) -> str:
+    label = getattr(item, "label", "")
+    return f" [{label}]" if label else ""
+
+
 def build_context(state: dict) -> str:
     """Build a text context block from CotListener state snapshot."""
     sections: list[str] = []
@@ -40,7 +47,7 @@ def build_context(state: dict) -> str:
     if positions:
         lines = ["UNIT POSITIONS:"]
         for p in positions.values():
-            parts = [f"  {p.callsign}: lat={p.lat:.5f} lon={p.lon:.5f}"]
+            parts = [f"  {p.callsign}{_tag(p)}: lat={p.lat:.5f} lon={p.lon:.5f}"]
             if p.speed is not None:
                 parts.append(f"speed={p.speed:.1f}m/s")
             if p.heading is not None:
@@ -60,7 +67,7 @@ def build_context(state: dict) -> str:
         for a in alerts:
             msg = f": {a.message}" if a.message else ""
             lines.append(
-                f"  {a.callsign} at lat={a.lat:.5f} lon={a.lon:.5f}{msg} "
+                f"  {a.callsign}{_tag(a)} at lat={a.lat:.5f} lon={a.lon:.5f}{msg} "
                 f"({_relative_time(a.timestamp)})"
             )
         sections.append("\n".join(lines))
@@ -73,7 +80,7 @@ def build_context(state: dict) -> str:
             src = f" [{d.source}]" if getattr(d, "source", "") else ""
             rem = f" — {_clip(d.remarks)}" if getattr(d, "remarks", "") else ""
             lines.append(
-                f"  {d.callsign or d.uid}{src}: lat={d.lat:.5f} lon={d.lon:.5f} "
+                f"  {d.callsign or d.uid}{src}{_tag(d)}: lat={d.lat:.5f} lon={d.lon:.5f} "
                 f"alt={d.alt:.0f}m ({_relative_time(d.timestamp)}){rem}"
             )
         sections.append("\n".join(lines))
@@ -86,7 +93,7 @@ def build_context(state: dict) -> str:
         for e in recent_events:
             rem = f" — {_clip(e.remarks)}" if e.remarks else ""
             lines.append(
-                f"  [{e.source}] {e.callsign} ({e.affiliation}): lat={e.lat:.5f} lon={e.lon:.5f} "
+                f"  [{e.source}] {e.callsign}{_tag(e)} ({e.affiliation}): lat={e.lat:.5f} lon={e.lon:.5f} "
                 f"({_relative_time(e.timestamp)}){rem}"
             )
         if len(events) > len(recent_events):
@@ -99,7 +106,7 @@ def build_context(state: dict) -> str:
         lines = ["SENSORS ONLINE:"]
         for a in assets:
             lines.append(
-                f"  [{a.source}] {a.callsign}: lat={a.lat:.5f} lon={a.lon:.5f} "
+                f"  [{a.source}] {a.callsign}{_tag(a)}: lat={a.lat:.5f} lon={a.lon:.5f} "
                 f"(last report {_relative_time(a.timestamp)})"
             )
         sections.append("\n".join(lines))
@@ -111,12 +118,27 @@ def build_context(state: dict) -> str:
         lines = ["RECENT MESSAGES:"]
         for m in recent:
             lines.append(
-                f"  {m.sender} -> {m.chatroom}: {m.body} "
+                f"  {m.sender}{_tag(m)} -> {m.chatroom}: {m.body} "
                 f"({_relative_time(m.timestamp)})"
             )
         sections.append("\n".join(lines))
 
     if not sections:
         return "No tactical data available."
+
+    from advisor.template_sitrep import count_phrase
+
+    flagged = [i for group in (list(positions.values()), alerts, drones, events, messages) for i in group
+               if getattr(i, "label", "")]
+    if flagged:
+        summary = []
+        if drones:
+            summary.append(count_phrase(drones, "drone detection"))
+        if events:
+            summary.append(count_phrase(events, "sensor detection"))
+        if positions:
+            summary.append(count_phrase(list(positions.values()), "unit position"))
+        sections.insert(0, "DATA LABELS: some of this picture is SIMULATED or RECORDED (exercise data). "
+                           "Counts: " + "; ".join(summary) + ".")
 
     return "\n\n".join(sections)

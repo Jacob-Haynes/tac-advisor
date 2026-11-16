@@ -50,6 +50,7 @@ class PositionInfo:
     heading: float | None = None
     battery: float | None = None
     timestamp: float = field(default_factory=time.time)
+    label: str = ""  # "SIMULATED" | "RECORDED" | "" (live), contract C4.3
 
 
 @dataclass
@@ -58,6 +59,7 @@ class MessageInfo:
     chatroom: str
     body: str
     timestamp: float = field(default_factory=time.time)
+    label: str = ""  # "SIMULATED" | "RECORDED" | "" (live), contract C4.3
 
 
 @dataclass
@@ -68,6 +70,7 @@ class AlertInfo:
     lon: float
     message: str = ""
     timestamp: float = field(default_factory=time.time)
+    label: str = ""  # "SIMULATED" | "RECORDED" | "" (live), contract C4.3
 
 
 @dataclass
@@ -78,6 +81,7 @@ class DroneInfo:
     alt: float = 0.0
     callsign: str = ""
     timestamp: float = field(default_factory=time.time)
+    label: str = ""  # "SIMULATED" | "RECORDED" | "" (live), contract C4.3
     source: str = ""
     remarks: str = ""
 
@@ -94,6 +98,7 @@ class SensorEvent:
     lon: float
     remarks: str = ""
     timestamp: float = field(default_factory=time.time)
+    label: str = ""  # "SIMULATED" | "RECORDED" | "" (live), contract C4.3
 
     @property
     def affiliation(self) -> str:
@@ -113,6 +118,7 @@ class SensorAsset:
     lon: float
     remarks: str = ""
     timestamp: float = field(default_factory=time.time)
+    label: str = ""  # "SIMULATED" | "RECORDED" | "" (live), contract C4.3
 
 
 # uid prefix -> tool name, for CoT from the ISR kit's sensor tools (case-insensitive)
@@ -127,6 +133,20 @@ SENSOR_UID_PREFIXES = {
     "fpv-vision-": "fpv-vision",
     "drone-": "drone-detector",
 }
+
+
+def data_label(uid: str = "", callsign: str = "", remarks: str = "") -> str:
+    """SIMULATED / RECORDED / "" (live) for a CoT event, from the kit's labelling (contract C4.3):
+    remarks starting "SIMULATED:" / "RECORDED:" (or "[SIM]" / "[REC]"), or a SIM- callsign/uid."""
+    rem = remarks.lstrip().upper()
+    if rem.startswith(("SIMULATED", "[SIM]")):
+        return "SIMULATED"
+    if rem.startswith(("RECORDED", "[REC]")):
+        return "RECORDED"
+    for v in (callsign.upper(), uid.upper()):
+        if v.startswith("SIM-") or "-SIM-" in v:
+            return "SIMULATED"
+    return ""
 
 
 def sensor_source(uid: str, remarks: str = "") -> str:
@@ -289,6 +309,7 @@ class CotListener:
             if remarks_el is not None and remarks_el.text:
                 remarks_text = remarks_el.text.strip()
         source = sensor_source(uid, remarks_text)
+        label = data_label(uid, callsign, remarks_text)
         parts = cot_type.split("-")
         is_atom = len(parts) >= 3 and parts[0] == "a"
         affiliation = parts[1] if is_atom else ""
@@ -299,20 +320,21 @@ class CotListener:
             if is_air and affiliation != "f":
                 self._drones[uid] = DroneInfo(
                     uid=uid, lat=lat, lon=lon, alt=alt, callsign=callsign,
-                    source=source, remarks=remarks_text,
+                    source=source, remarks=remarks_text, label=label,
                 )
 
             # Sensor tools' own position markers (acoustic node, OP, ...): assets, not troops
             elif source and is_atom and affiliation == "f":
                 self._assets[uid] = SensorAsset(
                     uid=uid, source=source, callsign=callsign, lat=lat, lon=lon, remarks=remarks_text,
+                    label=label,
                 )
 
             # Detections: hostile/unknown/suspect ground or sea contacts, or any atom from our sensors
             elif is_atom and (affiliation in ("h", "u", "s", "j", "k", "n") or source):
                 self._events[uid] = SensorEvent(
                     uid=uid, source=source or "TAK", cot_type=cot_type, callsign=callsign,
-                    lat=lat, lon=lon, remarks=remarks_text,
+                    lat=lat, lon=lon, remarks=remarks_text, label=label,
                 )
                 if len(self._events) > self.MAX_EVENTS:
                     oldest = min(self._events.values(), key=lambda e: e.timestamp)
@@ -334,7 +356,7 @@ class CotListener:
 
                 self._positions[callsign] = PositionInfo(
                     callsign=callsign, lat=lat, lon=lon, alt=alt,
-                    speed=speed, heading=heading, battery=battery,
+                    speed=speed, heading=heading, battery=battery, label=label,
                 )
 
             # GeoChat
@@ -351,7 +373,7 @@ class CotListener:
                         callsign = chat.get("senderCallsign", callsign)
 
                 self._messages.append(MessageInfo(
-                    sender=callsign, chatroom=chatroom, body=body,
+                    sender=callsign, chatroom=chatroom, body=body, label=data_label(uid, callsign, body),
                 ))
                 if len(self._messages) > self.MAX_MESSAGES:
                     self._messages = self._messages[-self.MAX_MESSAGES:]
@@ -365,14 +387,14 @@ class CotListener:
                         message = remarks.text or ""
                 self._alerts.append(AlertInfo(
                     callsign=callsign, alert_type=cot_type,
-                    lat=lat, lon=lon, message=message,
+                    lat=lat, lon=lon, message=message, label=data_label(uid, callsign, message),
                 ))
 
             # Spot reports / map points from a sensor tool (e.g. fpv-vision SPOTREP marker)
             elif source and cot_type.startswith("b-m-p"):
                 self._events[uid] = SensorEvent(
                     uid=uid, source=source, cot_type=cot_type, callsign=callsign,
-                    lat=lat, lon=lon, remarks=remarks_text,
+                    lat=lat, lon=lon, remarks=remarks_text, label=label,
                 )
 
     def _cleanup_loop(self):
@@ -446,6 +468,7 @@ class SimulatedCotListener(CotListener):
                         speed=random.uniform(0, 8),
                         heading=random.uniform(0, 360),
                         battery=random.uniform(40, 100),
+                        label="SIMULATED",
                     )
 
             # Occasional messages
@@ -464,7 +487,7 @@ class SimulatedCotListener(CotListener):
                 with self._lock:
                     self._messages.append(MessageInfo(
                         sender=sender, chatroom="All Chat Rooms",
-                        body=random.choice(messages),
+                        body=random.choice(messages), label="SIMULATED",
                     ))
                     if len(self._messages) > self.MAX_MESSAGES:
                         self._messages = self._messages[-self.MAX_MESSAGES:]
@@ -475,7 +498,7 @@ class SimulatedCotListener(CotListener):
                 with self._lock:
                     self._alerts.append(AlertInfo(
                         callsign=unit[0], alert_type="b-a-o-tbl",
-                        lat=unit[1], lon=unit[2], message="SOS — contact",
+                        lat=unit[1], lon=unit[2], message="SOS — contact", label="SIMULATED",
                     ))
 
             # Sensor tool events (as they would arrive from OTS)
@@ -496,10 +519,12 @@ class SimulatedCotListener(CotListener):
                 with self._lock:
                     if ev[2].startswith("a-u-A"):
                         self._drones[ev[0]] = DroneInfo(uid=ev[0], lat=lat, lon=lon, alt=40.0,
-                                                        callsign=ev[3], source=ev[1], remarks=ev[4])
+                                                        callsign=ev[3], source=ev[1], remarks=ev[4],
+                                                        label="SIMULATED")
                     else:
                         self._events[ev[0]] = SensorEvent(uid=ev[0], source=ev[1], cot_type=ev[2],
-                                                          callsign=ev[3], lat=lat, lon=lon, remarks=ev[4])
+                                                          callsign=ev[3], lat=lat, lon=lon, remarks=ev[4],
+                                                          label="SIMULATED")
 
             # Rare drone sighting
             if random.random() < 0.03:
@@ -512,6 +537,7 @@ class SimulatedCotListener(CotListener):
                         callsign="Unknown UAV",
                         source="drone-detector",
                         remarks="DRONE_CONFIRMED via DJI DroneID, serial 1581F4XXXX (simulated)",
+                        label="SIMULATED",
                     )
 
             time.sleep(2)
