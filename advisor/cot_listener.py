@@ -1,12 +1,22 @@
-"""Connect to TAK server TCP, parse CoT stream, maintain tactical state."""
+"""Connect to TAK server TCP, parse CoT stream, maintain tactical state.
+
+OpenTAKServer only streams CoT to a TCP client after that client has sent an
+event with a ``uid`` and ``<contact callsign>`` (that is when OTS binds the
+client's RabbitMQ queue). A purely passive reader gets nothing, so on connect,
+and every ``HELLO_INTERVAL_S``, we send a small SA "hello" whose stale time is
+already reached, so ATAK clients do not draw it on the map.
+"""
 
 import logging
+import os
 import random
 import socket
 import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from xml.sax.saxutils import quoteattr
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +78,87 @@ class DroneInfo:
     alt: float = 0.0
     callsign: str = ""
     timestamp: float = field(default_factory=time.time)
+    source: str = ""
+    remarks: str = ""
+
+
+@dataclass
+class SensorEvent:
+    """A detection reported by one of the sensor tools (acoustic, op-sentry, change-detect, rf-spectrum, ...)."""
+
+    uid: str
+    source: str
+    cot_type: str
+    callsign: str
+    lat: float
+    lon: float
+    remarks: str = ""
+    timestamp: float = field(default_factory=time.time)
+
+    @property
+    def affiliation(self) -> str:
+        parts = self.cot_type.split("-")
+        return {"h": "hostile", "u": "unknown", "n": "neutral", "s": "suspect", "j": "joker",
+                "k": "faker"}.get(parts[1] if len(parts) > 1 else "", "unknown")
+
+
+@dataclass
+class SensorAsset:
+    """A sensor's own position marker (e.g. an acoustic node or op-sentry OP)."""
+
+    uid: str
+    source: str
+    callsign: str
+    lat: float
+    lon: float
+    remarks: str = ""
+    timestamp: float = field(default_factory=time.time)
+
+
+# uid prefix -> tool name, for CoT from the ISR kit's sensor tools (case-insensitive)
+SENSOR_UID_PREFIXES = {
+    "acoustic-": "acoustic-detector",
+    "opsentry-": "op-sentry",
+    "op-sentry-": "op-sentry",
+    "change-detect-": "change-detect",
+    "changedetect-": "change-detect",
+    "rfspec-": "rf-spectrum",
+    "rf-spectrum-": "rf-spectrum",
+    "fpv-vision-": "fpv-vision",
+    "drone-": "drone-detector",
+}
+
+
+def sensor_source(uid: str, remarks: str = "") -> str:
+    """Which sensor tool produced this CoT, or "" if it does not look like one of ours."""
+    low = uid.lower()
+    for prefix, name in SENSOR_UID_PREFIXES.items():
+        if low.startswith(prefix):
+            return name
+    rlow = remarks.lower()
+    for name in ("acoustic-detector", "op-sentry", "change-detect", "rf-spectrum", "fpv-vision",
+                 "drone-detector"):
+        if name in rlow:
+            return name
+    return ""
+
+
+def _cot_time(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def build_hello(uid: str, callsign: str, now: float | None = None) -> str:
+    """SA event that makes OTS start streaming to us. Already stale, so ATAK will not show it."""
+    now = time.time() if now is None else now
+    t = _cot_time(now)
+    return (
+        f'<event version="2.0" uid={quoteattr(uid)} type="a-f-G-U-C" how="h-g-i-g-o" '
+        f'time="{t}" start="{t}" stale="{t}">'
+        '<point lat="0" lon="0" hae="0" ce="9999999" le="9999999"/>'
+        f"<detail><contact callsign={quoteattr(callsign)}/>"
+        '<takv platform="tac-advisor" device="Raspberry Pi" os="linux" version="1"/>'
+        "</detail></event>"
+    )
 
 
 class CotListener:
@@ -75,18 +166,27 @@ class CotListener:
 
     POSITION_STALE_S = 60
     ALERT_STALE_S = 300
+    EVENT_STALE_S = 900  # sensor detections stay in the picture for 15 min
+    ASSET_STALE_S = 600
     MAX_MESSAGES = 50
+    MAX_EVENTS = 100
     RECONNECT_MIN = 2
     RECONNECT_MAX = 60
+    HELLO_INTERVAL_S = 60
+    RECV_TIMEOUT_S = 5
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8087):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8087, callsign: str | None = None):
         self._host = host
         self._port = port
+        self._callsign = callsign or os.environ.get("ADVISOR_CALLSIGN", "TAC-ADVISOR")
+        self._uid = f"TAC-ADVISOR-{socket.gethostname()}"
         self._lock = threading.Lock()
         self._positions: dict[str, PositionInfo] = {}
         self._messages: list[MessageInfo] = []
         self._alerts: list[AlertInfo] = []
         self._drones: dict[str, DroneInfo] = {}
+        self._events: dict[str, SensorEvent] = {}
+        self._assets: dict[str, SensorAsset] = {}
         self._connected = False
         self._running = False
 
@@ -109,6 +209,8 @@ class CotListener:
                 "messages": list(self._messages),
                 "alerts": list(self._alerts),
                 "drones": list(self._drones.values()),
+                "sensor_events": sorted(self._events.values(), key=lambda e: e.timestamp),
+                "sensor_assets": list(self._assets.values()),
             }
 
     def _reader_loop(self):
@@ -119,13 +221,26 @@ class CotListener:
             sock = None
             try:
                 sock = socket.create_connection((self._host, self._port), timeout=10)
+                # Short recv timeout so we can send the periodic hello on a quiet network
+                # (a timeout is not a disconnect).
+                sock.settimeout(self.RECV_TIMEOUT_S)
+                sock.sendall(build_hello(self._uid, self._callsign).encode())
+                last_hello = time.monotonic()
                 self._connected = True
                 backoff = self.RECONNECT_MIN
-                logger.info("Connected to TAK at %s:%d", self._host, self._port)
+                parser = CotStreamParser()
+                logger.info("Connected to TAK at %s:%d (sent hello as %s)", self._host, self._port, self._uid)
 
                 while self._running:
-                    data = sock.recv(4096)
+                    if time.monotonic() - last_hello > self.HELLO_INTERVAL_S:
+                        sock.sendall(build_hello(self._uid, self._callsign).encode())
+                        last_hello = time.monotonic()
+                    try:
+                        data = sock.recv(65536)
+                    except socket.timeout:
+                        continue
                     if not data:
+                        logger.warning("TAK server closed the connection")
                         break
                     for event_xml in parser.feed(data.decode("utf-8", errors="replace")):
                         self._process_event(event_xml)
@@ -161,15 +276,50 @@ class CotListener:
         alt = float(point.get("hae", 0))
         detail = root.find("detail")
 
+        if uid == self._uid:
+            return  # our own hello echoed back
+
         callsign = uid
+        remarks_text = ""
         if detail is not None:
             contact = detail.find("contact")
             if contact is not None:
                 callsign = contact.get("callsign", uid)
+            remarks_el = detail.find("remarks")
+            if remarks_el is not None and remarks_el.text:
+                remarks_text = remarks_el.text.strip()
+        source = sensor_source(uid, remarks_text)
+        parts = cot_type.split("-")
+        is_atom = len(parts) >= 3 and parts[0] == "a"
+        affiliation = parts[1] if is_atom else ""
+        is_air = is_atom and parts[2] == "A"
 
         with self._lock:
+            # UAVs from any source (drone-detector, acoustic, ...)
+            if is_air and affiliation != "f":
+                self._drones[uid] = DroneInfo(
+                    uid=uid, lat=lat, lon=lon, alt=alt, callsign=callsign,
+                    source=source, remarks=remarks_text,
+                )
+
+            # Sensor tools' own position markers (acoustic node, OP, ...): assets, not troops
+            elif source and is_atom and affiliation == "f":
+                self._assets[uid] = SensorAsset(
+                    uid=uid, source=source, callsign=callsign, lat=lat, lon=lon, remarks=remarks_text,
+                )
+
+            # Detections: hostile/unknown/suspect ground or sea contacts, or any atom from our sensors
+            elif is_atom and (affiliation in ("h", "u", "s", "j", "k", "n") or source):
+                self._events[uid] = SensorEvent(
+                    uid=uid, source=source or "TAK", cot_type=cot_type, callsign=callsign,
+                    lat=lat, lon=lon, remarks=remarks_text,
+                )
+                if len(self._events) > self.MAX_EVENTS:
+                    oldest = min(self._events.values(), key=lambda e: e.timestamp)
+                    del self._events[oldest.uid]
+
             # PLI — friendly position
-            if cot_type.startswith("a-f-G-"):
+            elif cot_type.startswith("a-f-G-"):
                 speed = None
                 heading = None
                 battery = None
@@ -218,10 +368,11 @@ class CotListener:
                     lat=lat, lon=lon, message=message,
                 ))
 
-            # Hostile UAV (drone detector)
-            elif cot_type.startswith("a-h-A-"):
-                self._drones[uid] = DroneInfo(
-                    uid=uid, lat=lat, lon=lon, alt=alt, callsign=callsign,
+            # Spot reports / map points from a sensor tool (e.g. fpv-vision SPOTREP marker)
+            elif source and cot_type.startswith("b-m-p"):
+                self._events[uid] = SensorEvent(
+                    uid=uid, source=source, cot_type=cot_type, callsign=callsign,
+                    lat=lat, lon=lon, remarks=remarks_text,
                 )
 
     def _cleanup_loop(self):
@@ -247,6 +398,10 @@ class CotListener:
                 ]
                 for k in stale_drones:
                     del self._drones[k]
+
+                for store, max_age in ((self._events, self.EVENT_STALE_S), (self._assets, self.ASSET_STALE_S)):
+                    for k in [k for k, v in store.items() if now - v.timestamp > max_age]:
+                        del store[k]
 
 
 class SimulatedCotListener(CotListener):
@@ -323,6 +478,29 @@ class SimulatedCotListener(CotListener):
                         lat=unit[1], lon=unit[2], message="SOS — contact",
                     ))
 
+            # Sensor tool events (as they would arrive from OTS)
+            if random.random() < 0.05:
+                kind = random.choice(["acoustic", "opsentry", "change", "rf"])
+                lat = 51.15 + random.uniform(-0.004, 0.004)
+                lon = -1.75 + random.uniform(-0.004, 0.004)
+                ev = {
+                    "acoustic": ("ACOUSTIC-north-UAV", "acoustic-detector", "a-u-A", "UAV? (acoustic north)",
+                                 "Multirotor acoustic signature, confidence 0.82. Prop tone ~180 Hz."),
+                    "opsentry": ("opsentry-OP1-7", "op-sentry", "a-u-G-U-C-I", "OP1 2xPERSON BRG 045",
+                                 "op-sentry: 2 person(s) entering zone TRACK, bearing 045."),
+                    "change": ("change-detect-a1b2", "change-detect", "a-u-G", "CHANGE a1b2 (3)",
+                               "Change detected: new vehicle tracks at the gate [change-detect a1b2]"),
+                    "rf": ("RFSPEC-433-920", "rf-spectrum", "a-u-G", "RF 433.920",
+                           "New emitter 433.920 MHz, -48 dBm, bursty (likely ISM telemetry)."),
+                }[kind]
+                with self._lock:
+                    if ev[2].startswith("a-u-A"):
+                        self._drones[ev[0]] = DroneInfo(uid=ev[0], lat=lat, lon=lon, alt=40.0,
+                                                        callsign=ev[3], source=ev[1], remarks=ev[4])
+                    else:
+                        self._events[ev[0]] = SensorEvent(uid=ev[0], source=ev[1], cot_type=ev[2],
+                                                          callsign=ev[3], lat=lat, lon=lon, remarks=ev[4])
+
             # Rare drone sighting
             if random.random() < 0.03:
                 with self._lock:
@@ -332,6 +510,8 @@ class SimulatedCotListener(CotListener):
                         lon=-1.749 + random.uniform(-0.002, 0.002),
                         alt=random.uniform(30, 120),
                         callsign="Unknown UAV",
+                        source="drone-detector",
+                        remarks="DRONE_CONFIRMED via DJI DroneID, serial 1581F4XXXX (simulated)",
                     )
 
             time.sleep(2)

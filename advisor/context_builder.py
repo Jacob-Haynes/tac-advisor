@@ -5,10 +5,21 @@ import time
 SYSTEM_PROMPT = (
     "You are a tactical advisor for a UK Army Blue Force Tracker system. You provide concise, "
     "actionable suggestions using UK military terminology and doctrine. You have access to the "
-    "current operational picture including unit positions, alerts, messages, and drone detections. "
+    "current operational picture including unit positions, alerts, messages, drone detections and "
+    "reports from ISR sensors (acoustic, camera OP, change detection, RF spectrum). Treat sensor "
+    "detections as unconfirmed unless corroborated, and say which sensor reported them. "
     "Keep responses brief and formatted for quick reading. Use MGRS grid references where provided. "
     "Refer to units by callsign. Prioritise safety and force protection."
 )
+
+
+MAX_EVENTS_IN_CONTEXT = 15
+REMARKS_MAX = 140
+
+
+def _clip(text: str, limit: int = REMARKS_MAX) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _relative_time(ts: float) -> str:
@@ -59,9 +70,37 @@ def build_context(state: dict) -> str:
     if drones:
         lines = ["DRONE DETECTIONS:"]
         for d in drones:
+            src = f" [{d.source}]" if getattr(d, "source", "") else ""
+            rem = f" — {_clip(d.remarks)}" if getattr(d, "remarks", "") else ""
             lines.append(
-                f"  {d.callsign or d.uid}: lat={d.lat:.5f} lon={d.lon:.5f} "
-                f"alt={d.alt:.0f}m ({_relative_time(d.timestamp)})"
+                f"  {d.callsign or d.uid}{src}: lat={d.lat:.5f} lon={d.lon:.5f} "
+                f"alt={d.alt:.0f}m ({_relative_time(d.timestamp)}){rem}"
+            )
+        sections.append("\n".join(lines))
+
+    # Sensor detections (acoustic, op-sentry, change-detect, rf-spectrum, ... via OTS)
+    events = state.get("sensor_events", [])
+    recent_events = events[-MAX_EVENTS_IN_CONTEXT:]
+    if recent_events:
+        lines = ["SENSOR DETECTIONS (unconfirmed, newest last):"]
+        for e in recent_events:
+            rem = f" — {_clip(e.remarks)}" if e.remarks else ""
+            lines.append(
+                f"  [{e.source}] {e.callsign} ({e.affiliation}): lat={e.lat:.5f} lon={e.lon:.5f} "
+                f"({_relative_time(e.timestamp)}){rem}"
+            )
+        if len(events) > len(recent_events):
+            lines.append(f"  (+{len(events) - len(recent_events)} older detections not shown)")
+        sections.append("\n".join(lines))
+
+    # Sensor assets (where our sensors are)
+    assets = state.get("sensor_assets", [])
+    if assets:
+        lines = ["SENSORS ONLINE:"]
+        for a in assets:
+            lines.append(
+                f"  [{a.source}] {a.callsign}: lat={a.lat:.5f} lon={a.lon:.5f} "
+                f"(last report {_relative_time(a.timestamp)})"
             )
         sections.append("\n".join(lines))
 
