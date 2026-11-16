@@ -1,6 +1,6 @@
 # Tactical Advisor
 
-LLM tactical advisor for Raspberry Pi 5. It reads the CoT picture from OpenTAKServer (or any TAK server with a plain TCP CoT port) and builds a text context. It answers queries from a web UI and from `ADVISOR:` mesh texts. The LLM can be:
+LLM tactical advisor for Raspberry Pi 5. It reads the CoT picture from OpenTAKServer (or any TAK server with a plain TCP CoT port) and builds a text context. It answers queries from a web UI, from `ADVISOR:` mesh texts and from ATAK chat (GeoChat). The LLM can be:
 - **Ollama on the HQ Mac** over the hotspot (best answers),
 - **Google Gemini** (cloud, needs internet),
 - **a local GGUF model** on the Pi (llama.cpp, CPU only, always available offline),
@@ -157,6 +157,12 @@ ADVISOR: any sensor activity?
 ```
 
 The answer goes back to the sender as a mesh text under 200 characters. Queries are answered one at a time; if more than 5 are waiting, the sender gets "busy".
+
+## ATAK Chat Queries
+
+From ATAK on the TAK server (Wi-Fi or hotspot), send `ADVISOR: SITREP` (or `@ADVISOR sitrep`, any case) to **All Chat Rooms**, or a direct message to the contact `ADVISOR <host>`. The advisor answers in the same place: in All Chat Rooms, or as a DM back to you. The reply is the full answer, not trimmed to 200 characters, and comes from its registered identity (`isrkit-tac-advisor-<ISR_HOST>`, callsign `ADVISOR <ISR_HOST>`).
+
+It ignores its own messages, other kit tools, and chat without the prefix. GeoChat that OTS made from a mesh text (`<contact endpoint="MQTT">`) is left to the mesh handler, which answers over the radio. The same query from the same sender arriving over both mesh and chat within 30 s is answered once. `GEOCHAT=0` turns chat queries off. Code: `advisor/geochat.py`.
 
 ## Model Setup
 

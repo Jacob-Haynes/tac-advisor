@@ -82,6 +82,15 @@ def main():
         mesh.start()
         link.start()
 
+    # ATAK GeoChat queries ("ADVISOR: ..." / "@ADVISOR ..." in a chat room or a DM to us)
+    if not args.simulate and os.environ.get("GEOCHAT", "1").strip() != "0":
+        from advisor.geochat import GeoChatResponder
+
+        geochat = GeoChatResponder(engine, listener, listener.uid, listener.callsign,
+                                   send=listener.send_cot, position=listener.position).start()
+        listener.on_chat = geochat.on_chat
+        log.info("GeoChat queries answered as %s", listener.callsign)
+
     # Web UI
     from advisor.web import app as web_module
 

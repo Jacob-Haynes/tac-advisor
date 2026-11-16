@@ -1,4 +1,4 @@
-"""Answer ``ADVISOR:``-prefixed mesh texts with the LLM, replying to the sender.
+"""Answer ``ADVISOR:``/``@ADVISOR``-prefixed mesh texts with the LLM, replying to the sender.
 
 Texts arrive through a mesh link (meshbus by default, see ``mesh_link``). LLM
 calls take seconds, so queries are queued and answered on a worker thread
@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
+import time
 
 from advisor.context_builder import SYSTEM_PROMPT, build_context
 from advisor.mesh_link import InboundText
@@ -25,12 +27,47 @@ MESH_STYLE = (
 )
 
 
+_PREFIX_RE = re.compile(r"^\s*(?:ADVISOR\s*:|@ADVISOR\b[\s:,]*)", re.IGNORECASE)
+
+
 def extract_query(text: str) -> str | None:
-    stripped = text.strip()
-    if not stripped.upper().startswith(ADVISOR_PREFIX):
+    """The query after "ADVISOR:" or "@ADVISOR" (any case), else None."""
+    m = _PREFIX_RE.match(text or "")
+    if not m:
         return None
-    query = stripped[len(ADVISOR_PREFIX):].strip()
+    query = text[m.end():].strip()
     return query or None
+
+
+def _norm(query: str) -> str:
+    return " ".join(query.lower().split()).rstrip("?.! ")
+
+
+class RecentQueries:
+    """Answer a query once when it arrives over both the mesh and GeoChat (bridge/OTS echo).
+
+    ``claim(channel, query, names)`` returns False if another channel claimed the same query
+    from the same sender (any shared name/uid, case-insensitive) within ``window_s``.
+    """
+
+    def __init__(self, window_s: float = 30.0):
+        self.window_s = window_s
+        self._claims: list[tuple[float, str, str, frozenset]] = []
+        self._lock = threading.Lock()
+
+    def claim(self, channel: str, query: str, names) -> bool:
+        names = frozenset(n.lower() for n in ([names] if isinstance(names, str) else names) if n)
+        key, now = _norm(query), time.time()
+        with self._lock:
+            self._claims = [c for c in self._claims if now - c[0] < self.window_s]
+            for _, ch, k, who in self._claims:
+                if ch != channel and k == key and (who & names):
+                    return False
+            self._claims.append((now, channel, key, names))
+            return True
+
+
+RECENT = RecentQueries()
 
 
 _ERROR_MARKERS = ("no llm available", "error:", "llm_url", "gemini_api_key", "/etc/tac-advisor.env",
@@ -52,7 +89,8 @@ def shorten(response: str, limit: int = MAX_RESPONSE_LEN) -> str:
 class MeshQueryHandler:
     """Handles mesh text queries prefixed with ADVISOR:."""
 
-    def __init__(self, engine, listener, link=None):
+    def __init__(self, engine, listener, link=None, recent: RecentQueries | None = None):
+        self._recent = recent or RECENT
         self._engine = engine
         self._listener = listener
         self._link = link
@@ -72,6 +110,9 @@ class MeshQueryHandler:
     def on_text(self, msg: InboundText):
         query = extract_query(msg.text)
         if query is None:
+            return
+        if not self._recent.claim("mesh", query, msg.names | {msg.display}):
+            logger.info("Mesh query %r from %s was already answered in GeoChat", query, msg.display)
             return
         logger.info("Mesh query from %s: %s", msg.display, query)
         try:

@@ -178,6 +178,22 @@ class CotListener:
         self._assets: dict[str, SensorAsset] = {}
         self._connected = False
         self._running = False
+        self.on_chat = None  # callable(GeoChatMsg) for GeoChat; set by __main__ (advisor.geochat)
+
+    @property
+    def uid(self) -> str:
+        return self._uid
+
+    @property
+    def callsign(self) -> str:
+        return self._callsign
+
+    def position(self) -> tuple[float | None, float | None]:
+        return self._client.sensor_lat, self._client.sensor_lon
+
+    def send_cot(self, xml: str) -> None:
+        """Send on our registered TAK connection (queued until registered)."""
+        self._client.send(xml)
 
     @property
     def connected(self) -> bool:
@@ -243,6 +259,7 @@ class CotListener:
         is_atom = len(parts) >= 3 and parts[0] == "a"
         affiliation = parts[1] if is_atom else ""
         is_air = is_atom and parts[2] == "A"
+        chat_msg = None
 
         with self._lock:
             # UAVs from any source (drone-detector, acoustic, ...)
@@ -290,6 +307,11 @@ class CotListener:
 
             # GeoChat
             elif cot_type == "b-t-f":
+                from advisor.geochat import parse_geochat
+
+                chat_msg = parse_geochat(root, self._uid, self._callsign)
+                if chat_msg is not None and chat_msg.sender_uid == self._uid:
+                    return  # our own reply
                 body = ""
                 chatroom = "All Chat Rooms"
                 if detail is not None:
@@ -325,6 +347,12 @@ class CotListener:
                     uid=uid, source=source, cot_type=cot_type, callsign=callsign,
                     lat=lat, lon=lon, remarks=remarks_text, label=label,
                 )
+
+        if chat_msg is not None and self.on_chat is not None:  # outside the lock: it may queue a reply
+            try:
+                self.on_chat(chat_msg)
+            except Exception:
+                logger.exception("GeoChat handler failed")
 
     def _kit_registration(self, root, uid: str, lat: float, lon: float, point):
         """A kit tool's registration SA: a sensor asset if it carries a position, else ignored."""
