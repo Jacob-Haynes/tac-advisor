@@ -65,7 +65,7 @@ If a network backend fails (Mac asleep or off the hotspot, no internet, bad key)
 
 ## HQ Mac: Ollama Setup (macOS, Apple Silicon)
 
-The HQ Mac (M5 Pro, 64 GB, `isr-hq.local`) runs the LLM for the advisor and a vision model for the other tools.
+The HQ Mac (M4 Max, 48 GB, `isr-hq.local`) runs the LLM for the advisor and a vision model for the other tools.
 
 1. Install Ollama from <https://ollama.com/download> and start the app. qwen3-vl needs Ollama 0.12.7 or newer.
 2. Let the Pi reach it. By default Ollama only listens on localhost:
@@ -78,7 +78,9 @@ The HQ Mac (M5 Pro, 64 GB, `isr-hq.local`) runs the LLM for the advisor and a vi
    ollama pull qwen3.5:27b    # advisor LLM: 17-20 GB, 256K context, thinking (the advisor turns it off)
    ollama pull qwen3-vl:8b    # vision model for the other tools: 6.2 GB
    ```
-   Together that is about 26 GB, leaving plenty of the 64 GB for context and macOS. Ollama keeps up to 3 models loaded at once by default. Faster alternative: `qwen3.5:35b` (22 GB, a mixture-of-experts model, quicker per token). On the 32 GB Drone-ops Mac use `qwen3.5:9b` (6.6-7.6 GB). Sizes are from ollama.com/library, checked 2026-11-16.
+   Together that is about 26 GB. On a 48 GB Mac, macOS lets the GPU use about 36 GB of memory by default, so both models plus their context are expected to fit. This has not been tested on the HQ Mac yet; the platform session will confirm it. Ollama keeps up to 3 models loaded at once by default.
+
+   If they don't fit (Ollama unloads one model to load the other, or answers are very slow), use a smaller advisor model: `qwen3.5:9b` (6.6-7.6 GB, about 14 GB with qwen3-vl:8b). Pull it and set `LLM_MODEL=qwen3.5:9b` in `/etc/tac-advisor.env` on the Pi. Faster but larger alternative: `qwen3.5:35b` (22 GB, a mixture-of-experts model, quicker per token; about 28 GB with qwen3-vl:8b, which leaves less room for context). On the 32 GB Drone-ops Mac use `qwen3.5:9b`. Sizes are from ollama.com/library, checked 2026-11-16.
 4. Check from the Pi:
    ```bash
    curl http://isr-hq.local:11434/api/tags
