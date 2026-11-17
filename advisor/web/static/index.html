@@ -1,153 +1,164 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tactical Advisor</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff41; }
-        .header { background: #111; padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
-        .header h1 { font-size: 18px; letter-spacing: 2px; }
-        .status-bar { display: flex; gap: 16px; font-size: 12px; color: #888; flex-wrap: wrap; }
-        .status-bar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
-        .dot.active { background: #00ff41; }
-        .dot.inactive { background: #ff4444; }
-        .dot.loading { background: #ff8800; }
-
-        .container { padding: 20px; max-width: 900px; margin: 0 auto; }
-
-        .stats { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-        .stat { background: #111; border: 1px solid #333; padding: 8px 14px; border-radius: 4px; }
-        .stat .num { font-size: 20px; color: #fff; }
-        .stat .label { font-size: 10px; color: #888; text-transform: uppercase; }
-
-        .section-title { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 8px; }
-
-        .quick-buttons { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-        .quick-btn { background: #1a1a1a; border: 1px solid #333; color: #00ff41; padding: 8px 14px; font-family: inherit; font-size: 12px; cursor: pointer; border-radius: 4px; }
-        .quick-btn:hover { background: #222; border-color: #00ff41; }
-
-        .query-box { display: flex; gap: 8px; margin-bottom: 20px; }
-        .query-box input { flex: 1; background: #111; border: 1px solid #333; color: #00ff41; padding: 10px 14px; font-family: inherit; font-size: 14px; border-radius: 4px; }
-        .query-box input:focus { outline: none; border-color: #00ff41; }
-        .query-box button { background: #00ff41; color: #0a0a0a; border: none; padding: 10px 20px; font-family: inherit; font-size: 14px; font-weight: bold; cursor: pointer; border-radius: 4px; }
-        .query-box button:hover { background: #00cc33; }
-        .query-box button:disabled { background: #333; color: #666; cursor: not-allowed; }
-
-        .response-area { background: #111; border: 1px solid #333; border-radius: 4px; padding: 16px; min-height: 200px; white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: #ccc; }
-        .response-area.loading { color: #ff8800; }
-        .response-area .placeholder { color: #555; }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI advisor</title>
+<link rel="stylesheet" href="/static/isr-ui.css">
+<script src="/static/isr-ui.js"></script>
+<style>
+  .ta-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .ta-head h2 { margin: 0; }
+  .ta-head .isr-btn.primary { margin-left: auto; }
+  .ta-sitrep { white-space: pre-wrap; font-size: 22px; line-height: 1.45; min-height: 150px; }
+  .ta-sitrep.empty { color: var(--muted); font-size: 18px; }
+  .ta-meta { margin-top: 10px; }
+  .ta-ask { display: flex; gap: 10px; margin-top: 14px; }
+  .ta-ask input { flex: 1; }
+  .ta-chat li { flex-direction: column; align-items: stretch; gap: 4px; }
+  .ta-q { display: flex; gap: 10px; align-items: baseline; }
+  .ta-q strong { font-weight: 600; }
+  .ta-q .isr-muted:last-child { margin-left: auto; }
+  .ta-a { white-space: pre-wrap; color: var(--text); font-size: 15px; max-height: 6.2em; overflow: hidden; }
+  .ta-src { font-size: 12px; font-weight: 700; color: var(--muted); letter-spacing: .05em; }
+  @media (max-width: 640px) { .ta-sitrep { font-size: 18px; } .ta-ask { flex-direction: column; } }
+</style>
 </head>
 <body>
-    <div class="header">
-        <h1>TACTICAL ADVISOR</h1>
-        <div class="status-bar">
-            <span><span class="dot loading" id="model-dot"></span><span id="model-status">Loading...</span></span>
-            <span><span class="dot inactive" id="tak-dot"></span><span id="tak-status">TAK Disconnected</span></span>
-        </div>
+<header class="isr-bar">
+  <h1>AI advisor</h1><span class="isr-sub">SITREP in chat</span>
+  <div class="isr-right">
+    <button class="isr-pill" id="isr-status">Starting</button>
+    <a class="isr-kit-link" id="isr-kit-link" href="#">Kit</a>
+  </div>
+  <div class="isr-status-list" id="isr-status-list"></div>
+</header>
+
+<main>
+  <div class="isr-card">
+    <div class="ta-head">
+      <h2>Latest SITREP</h2>
+      <span class="isr-tag sim" id="sim-tag" hidden>SIM</span>
+      <button class="isr-btn primary" id="sitrep-btn">Generate SITREP</button>
     </div>
+    <div class="ta-sitrep empty" id="sitrep">No SITREP yet. Generate one here, or send "ADVISOR: SITREP" in ATAK chat.</div>
+    <div class="ta-meta isr-muted" id="sitrep-meta"></div>
+    <form class="ta-ask" id="ask" autocomplete="off">
+      <input id="ask-input" placeholder="Ask about the picture, e.g. any drone threat?" aria-label="Question">
+      <button class="isr-btn" type="submit" id="ask-btn">Ask</button>
+    </form>
+  </div>
 
-    <div class="container">
-        <div class="stats">
-            <div class="stat"><div class="num" id="stat-units">0</div><div class="label">Units</div></div>
-            <div class="stat"><div class="num" id="stat-messages">0</div><div class="label">Messages</div></div>
-            <div class="stat"><div class="num" id="stat-alerts" style="color:#ff8800">0</div><div class="label">Alerts</div></div>
-            <div class="stat"><div class="num" id="stat-drones" style="color:#ff4444">0</div><div class="label">Drones</div></div>
-            <div class="stat"><div class="num" id="stat-sensors" style="color:#ffcc00">0</div><div class="label">Sensor hits</div></div>
-        </div>
+  <h2 class="isr-section" style="margin-top:22px">Recent questions</h2>
+  <div class="isr-card">
+    <ul class="isr-list ta-chat" id="chat"></ul>
+    <p class="isr-muted" id="chat-empty">No questions yet. In ATAK, send "ADVISOR: &lt;question&gt;" to All Chat Rooms.</p>
+  </div>
 
-        <div class="section-title">Quick queries</div>
-        <div class="quick-buttons">
-            <button class="quick-btn" onclick="sendQuery('Give me a SITREP summary of the current operational picture')">SITREP Summary</button>
-            <button class="quick-btn" onclick="sendQuery('Assess current threats and recommend force protection measures')">Threat Assessment</button>
-            <button class="quick-btn" onclick="sendQuery('Assess unit dispersion and recommend adjustments')">Unit Dispersion</button>
-            <button class="quick-btn" onclick="sendQuery('Summarise drone threat activity and recommend countermeasures')">Drone Threat</button>
-        </div>
+  <details class="isr-more">
+    <summary>Details</summary>
+    <p id="picture"></p>
+    <p id="model"></p>
+    <p><a href="/api/context" target="_blank">Show the picture text given to the model</a></p>
+  </details>
+</main>
 
-        <div class="section-title">Query</div>
-        <div class="query-box">
-            <input type="text" id="query-input" placeholder="Ask the tactical advisor..." onkeydown="if(event.key==='Enter')submitQuery()">
-            <button id="send-btn" onclick="submitQuery()">SEND</button>
-        </div>
+<script>
+  const SOURCE = {chat: 'ATAK CHAT', mesh: 'MESH', web: 'THIS PAGE'};
+  let busy = false, history = [];
 
-        <div class="section-title">Response</div>
-        <div class="response-area" id="response">
-            <span class="placeholder">Response will appear here...</span>
-        </div>
-    </div>
+  function ago(ts) {
+    const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+    if (s < 60) return `${s} s ago`;
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    return `${Math.round(s / 3600)} h ago`;
+  }
+  const el = (id) => document.getElementById(id);
+  function li(e) {
+    const item = document.createElement('li');
+    const q = document.createElement('div'); q.className = 'ta-q';
+    const src = document.createElement('span'); src.className = 'ta-src'; src.textContent = SOURCE[e.source] || e.source;
+    const who = document.createElement('strong'); who.textContent = e.source === 'web' ? e.query : `${e.who}: ${e.query}`;
+    const when = document.createElement('span'); when.className = 'isr-muted'; when.textContent = ago(e.ts);
+    q.append(src, who, when);
+    const a = document.createElement('div'); a.className = 'ta-a'; a.textContent = e.answer;
+    item.append(q, a);
+    return item;
+  }
 
-    <script>
-        const responseEl = document.getElementById('response');
-        const inputEl = document.getElementById('query-input');
-        const sendBtn = document.getElementById('send-btn');
+  function renderHistory() {
+    const latest = history.find(e => /sitrep/i.test(e.query)) || history[0];
+    if (latest && !busy) {
+      el('sitrep').className = 'ta-sitrep';
+      el('sitrep').textContent = latest.answer;
+      el('sitrep-meta').textContent = `${SOURCE[latest.source] === 'THIS PAGE' ? 'From this page' :
+        'Asked by ' + latest.who} ${ago(latest.ts)}` + (latest.backend ? ` · ${latest.backend}` : '');
+    }
+    const rest = history.filter(e => e !== latest);  // the one above isn't repeated
+    el('chat-empty').hidden = rest.length > 0;
+    el('chat').replaceChildren(...rest.slice(0, 10).map(li));
+  }
 
-        function sendQuery(text) {
-            inputEl.value = text;
-            submitQuery();
-        }
+  async function loadHistory() {
+    try { history = await (await fetch('/api/history?limit=20')).json(); renderHistory(); } catch (e) { /* restarting */ }
+  }
 
-        async function submitQuery() {
-            const query = inputEl.value.trim();
-            if (!query) return;
+  async function ask(query, btn) {
+    if (busy || !query) return;
+    busy = true;
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Working…';
+    el('sitrep').className = 'ta-sitrep empty';
+    el('sitrep').textContent = 'Asking the model. This can take up to a minute.';
+    el('sitrep-meta').textContent = '';
+    try {
+      const r = await fetch('/api/query', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query})});
+      if (!r.ok) throw new Error(String(r.status));
+      await r.json();
+    } catch (e) {
+      el('sitrep').textContent = 'No answer: the advisor is not responding. Check the status pill and try again.';
+    }
+    busy = false;
+    btn.disabled = false; btn.textContent = label;
+    await loadHistory();
+    if (history.length) {  // show what was just asked, even if it was not a SITREP
+      const e = history[0];
+      el('sitrep').className = 'ta-sitrep'; el('sitrep').textContent = e.answer;
+      el('sitrep-meta').textContent = `From this page ${ago(e.ts)}` + (e.backend ? ` · ${e.backend}` : '');
+    }
+  }
 
-            sendBtn.disabled = true;
-            responseEl.className = 'response-area loading';
-            responseEl.textContent = 'Thinking...';
+  el('sitrep-btn').addEventListener('click', () => ask('Give me a SITREP', el('sitrep-btn')));
+  el('ask').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = el('ask-input').value.trim();
+    if (q) { ask(q, el('ask-btn')); el('ask-input').value = ''; }
+  });
 
-            try {
-                const res = await fetch('/api/query', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({query}),
-                });
-                const data = await res.json();
-                responseEl.className = 'response-area';
-                responseEl.textContent = data.response;
-            } catch (e) {
-                responseEl.className = 'response-area';
-                responseEl.textContent = 'Error: ' + e.message;
-            } finally {
-                sendBtn.disabled = false;
-            }
-        }
+  async function pollStatus() {
+    try {
+      const s = await (await fetch('/api/status')).json();
+      const llm = s.llm || {};
+      const ai = llm.primary === 'template'
+        ? {name: 'AI', state: 'warn', text: 'no model: offline summary only'}
+        : {name: 'AI', state: s.model_loaded ? 'ok' : 'bad', text: s.active_backend || llm.primary || 'not loaded'};
+      const checks = [ai, {name: 'TAK', state: s.tak_connected ? 'ok' : 'bad', text: s.tak_connected ? 'connected' : 'not connected'}];
+      if (s.mesh) checks.push({name: 'Mesh', state: s.mesh_connected ? 'ok' : 'bad',
+        text: s.mesh_connected ? 'connected' : 'not connected', optional: true});
+      ISR.setStatus(checks);
+      el('sim-tag').hidden = !s.simulated;
+      el('picture').textContent = `Picture: ${s.positions} units, ${s.drones} drones, ${s.sensor_events} sensor detections, ` +
+        `${s.alerts} alerts, ${s.messages} chat messages.`;
+      el('model').textContent = `Model: ${s.model_name || 'none'}` + (llm.llm_server ? `. LLM server ${llm.llm_server}.` : '.');
+    } catch (e) {
+      ISR.setStatus([{name: 'Advisor', state: 'bad', text: 'not responding'}]);
+    }
+  }
 
-        async function pollStatus() {
-            try {
-                const res = await fetch('/api/status');
-                const s = await res.json();
-
-                document.getElementById('stat-units').textContent = s.positions;
-                document.getElementById('stat-messages').textContent = s.messages;
-                document.getElementById('stat-alerts').textContent = s.alerts;
-                document.getElementById('stat-drones').textContent = s.drones;
-                document.getElementById('stat-sensors').textContent = s.sensor_events ?? 0;
-
-                const modelDot = document.getElementById('model-dot');
-                const modelStatus = document.getElementById('model-status');
-                if (s.model_loaded) {
-                    modelDot.className = 'dot active';
-                    modelStatus.textContent = s.model_name || 'Model loaded';
-                } else {
-                    modelDot.className = 'dot loading';
-                    modelStatus.textContent = 'No model';
-                }
-
-                const takDot = document.getElementById('tak-dot');
-                const takStatus = document.getElementById('tak-status');
-                if (s.tak_connected) {
-                    takDot.className = 'dot active';
-                    takStatus.textContent = 'TAK Connected';
-                } else {
-                    takDot.className = 'dot inactive';
-                    takStatus.textContent = 'TAK Disconnected';
-                }
-            } catch (e) {}
-        }
-
-        setInterval(pollStatus, 3000);
-        pollStatus();
-    </script>
+  pollStatus(); loadHistory();
+  setInterval(pollStatus, 5000);
+  setInterval(() => { if (!busy) loadHistory(); }, 5000);
+</script>
 </body>
 </html>

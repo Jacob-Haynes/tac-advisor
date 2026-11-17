@@ -52,7 +52,17 @@ def create_app():
             from advisor.template_sitrep import ensure_categories
 
             response = ensure_categories(response, state)  # every nonzero category stays in
+        from advisor.history import HISTORY
+
+        HISTORY.add("web", "web", req.query, response, engine.last_backend)
         return {"response": response, "backend": engine.last_backend}
+
+    @app.get("/api/history")
+    async def history(limit: int = 20):
+        """Recent queries and answers from the web page, ATAK chat and the mesh, newest first."""
+        from advisor.history import HISTORY
+
+        return HISTORY.recent(max(1, min(limit, 50)))
 
     @app.get("/api/context")
     async def context():
@@ -78,6 +88,8 @@ def create_app():
             "llm": engine.status() if engine else None,
             "mesh": type(mesh_link).__name__ if mesh_link is not None else None,
             "mesh_connected": bool(getattr(mesh_link, "connected", False)),
+            "simulated": type(listener).__name__ == "SimulatedCotListener",
+            "active_backend": engine.last_backend if engine else None,
         }
 
     return app

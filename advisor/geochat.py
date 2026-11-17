@@ -317,7 +317,11 @@ class GeoChatResponder:
         if not self._recent.claim("geochat", query, msg.sender_callsign):
             logger.info("GeoChat query %r also came over the mesh: answered there", query)
             return False
-        self.reply(msg, self.answer(msg))
+        text = self.answer(msg)
+        self.reply(msg, text)
+        from advisor.history import HISTORY
+
+        HISTORY.add("chat", msg.sender_callsign, query, text, getattr(self._engine, "last_backend", ""))
         return True
 
     def _worker(self):

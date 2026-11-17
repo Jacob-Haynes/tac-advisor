@@ -155,6 +155,11 @@ class MeshQueryHandler:
             except queue.Empty:
                 continue
             try:
-                self._reply(msg, self.answer(msg))
+                text = self.answer(msg)
+                self._reply(msg, text)
+                from advisor.history import HISTORY
+
+                HISTORY.add("mesh", msg.display, extract_query(msg.text) or "", text,
+                            getattr(self._engine, "last_backend", ""))
             except Exception:
                 logger.exception("Failed to answer mesh query from %s", msg.from_id)  # nothing sent
