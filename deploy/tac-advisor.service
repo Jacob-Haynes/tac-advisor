@@ -1,13 +1,18 @@
 [Unit]
 Description=Tactical LLM Advisor
-After=network.target opentakserver.service
+After=network.target opentakserver.service mesh-bridge.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/tac-advisor
-ExecStart=/opt/tac-advisor/deploy/start.sh
+EnvironmentFile=-/etc/tac-advisor.env
+# Starts without OTS, the radio or a model: it reconnects to TAK and meshbus in the background.
+# ADVISOR_ARGS can add e.g. --simulate.
+ExecStart=/bin/sh -c 'exec /opt/tac-advisor/.venv/bin/python -m advisor $ADVISOR_ARGS'
 Restart=always
 RestartSec=5
+TimeoutStopSec=15
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

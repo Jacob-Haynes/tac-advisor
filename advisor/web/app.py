@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ class QueryRequest(BaseModel):
 # Set by __main__.py before starting
 engine = None
 listener = None
+mesh_link = None
 
 
 def create_app():
@@ -44,8 +46,31 @@ def create_app():
         context = build_context(state)
         full_prompt = f"{context}\n\nQuery: {req.query}"
 
-        response = engine.generate(SYSTEM_PROMPT, full_prompt)
-        return {"response": response}
+        # LLM calls block for seconds; keep them off the event loop
+        response = await run_in_threadpool(engine.generate, SYSTEM_PROMPT, full_prompt)
+        if not str(engine.last_backend or "").startswith("template"):
+            from advisor.template_sitrep import ensure_categories
+
+            response = ensure_categories(response, state)  # every nonzero category stays in
+        from advisor.history import HISTORY
+
+        HISTORY.add("web", "web", req.query, response, engine.last_backend)
+        return {"response": response, "backend": engine.last_backend}
+
+    @app.get("/api/history")
+    async def history(limit: int = 20):
+        """Recent queries and answers from the web page, ATAK chat and the mesh, newest first."""
+        from advisor.history import HISTORY
+
+        return HISTORY.recent(max(1, min(limit, 50)))
+
+    @app.get("/api/context")
+    async def context():
+        """The exact picture text the LLM is given (useful when demoing)."""
+        from advisor.context_builder import build_context
+
+        state = listener.get_state() if listener else {}
+        return {"context": build_context(state)}
 
     @app.get("/api/status")
     async def status():
@@ -58,6 +83,13 @@ def create_app():
             "messages": len(state.get("messages", [])),
             "alerts": len(state.get("alerts", [])),
             "drones": len(state.get("drones", [])),
+            "sensor_events": len(state.get("sensor_events", [])),
+            "sensor_assets": len(state.get("sensor_assets", [])),
+            "llm": engine.status() if engine else None,
+            "mesh": type(mesh_link).__name__ if mesh_link is not None else None,
+            "mesh_connected": bool(getattr(mesh_link, "connected", False)),
+            "simulated": type(listener).__name__ == "SimulatedCotListener",
+            "active_backend": engine.last_backend if engine else None,
         }
 
     return app
