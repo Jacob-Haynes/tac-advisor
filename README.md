@@ -174,7 +174,7 @@ Download a GGUF model into `/var/lib/tac-advisor/models/`:
 ## Tests
 
 ```bash
-pip install -r requirements.txt pytest httpx   # llama-cpp-python is not needed for the tests
+pip install -r requirements.txt -r requirements-dev.txt   # versions capped at the ones tested; the tests never load a model
 python -m pytest
 ```
 
